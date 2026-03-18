@@ -1,36 +1,53 @@
-# Contributing / 開發指南
+# Contributing / 開發指南（詳細）
 
-歡迎來到 RhythmClicker！感謝你願意協助改進此專案。以下為快速上手與貢獻流程。
+感謝你對 RhythmClicker 的興趣！本文件說明如何為此專案貢獻、建立開發環境與專案流程規範。
 
-## 快速概覽
-- 本倉庫包含遊戲核心程式碼（ prototype 版），遊戲仍在開發中。
-- 若要本機編譯與執行，請參照 `DEVELOPMENT.md` 中的建置指令。
+1) 問題回報（Issue）
+- 如發現 bug、崩潰或想提出新功能（feature），請先建立 Issue，內容應包含：
+  - 問題摘要（英文或中文皆可）
+  - 重現步驟（越詳盡越好）
+  - 相關平台與環境（Windows 版本、.NET SDK、MonoGame 版本）
 
-## 建置與執行（開發者）
-1. 複製或 fork 此倉庫到你的 GitHub 帳號，clone 到本機。
-2. 在專案根目錄執行：
+2) 分支與提交規範
+- 請從 `main` 建立功能分支，分支命名範例：`feat/<短描述>`、`fix/<短描述>`、`chore/<短描述>`。
+- commit 訊息請清楚描述變更，格式建議：`[type] 簡短描述`，例如 `[feat] 新增選單效果`、`[fix] 修正 miss 判定`。
 
+3) Pull Request（PR）流程
+- 在 PR 描述中包含變更摘要、如何測試，以及可能的回歸風險。
+- 若 PR 為重大變動或破壞相容性，請在標題與描述中標注（breaking change），並先在 Issue 中討論。
+- 指派 reviewers 並等待至少一位 maintainer 批准後合併。
+
+4) 建置與本機環境
+- 必要工具：.NET SDK（建議使用 .NET 6/7）、MonoGame DesktopGL（3.8.x）。
+- 範例建置指令：
 ```
 dotnet build RhythmClicker/ClickerGame.csproj -c Debug
 dotnet run --project RhythmClicker/ClickerGame.csproj -c Debug
 ```
+- 建議使用 Windows 進行開發與測試（目前 `TextRenderer` 使用 System.Drawing），若在 macOS/Linux 上開發，請先改用 `SpriteFont`。
 
-（本專案目前以 Windows / MonoGame 為主要測試平台；`TextRenderer` 使用 System.Drawing，跨平台時建議改用 `SpriteFont`。）
+5) 資產管理
+- 本 export 不含大量資產（大型音訊、圖檔）。新增示例資源請放在 `Assets/` 並註明來源及授權。
 
-## 開發流程
-- 請先建立 issue 說明你要處理的功能或修正（若是重大改動，先開 RFC 類型的 issue）。
-- 開發前請以 `git checkout -b feat/描述-或-fix/描述` 建立分支。
-- 完成後發 Pull Request（PR），PR 標題格式建議：`[feat] 新功能簡述` 或 `[fix] 錯誤簡述`。
+6) 程式碼風格與品質
+- 使用清晰命名、單一職責函式與小型類別。避免大型方法與過深繼承。
+- 保持 nullable 參考類型設定（`<Nullable>enable</Nullable>`）。
 
-## 程式碼風格
-- 保持簡潔、直觀的命名與小型函式。使用 C# 最新語法特性（倉庫預設 `Nullable` 開啟）。
-- 若修改公共 API（類別/方法簽章），請在 PR 描述中註明向下相容性情況。
+7) 測試與驗證
+- 本原型尚未加入 CI 或自動化測試，請在本機執行以下檢查：
+  - 能載入並播放示例音訊
+  - 按鍵判定（D/F/J/K）正確，miss 不阻塞
+  - 進入/離開全螢幕（Esc 回選單）
+  - 帳號註冊能存檔 `Accounts/accounts.json`
 
-## 測試與驗證
-- 本原型尚無完整自動化測試；請在本地手動測試關鍵流程（載入曲目、播放、按鍵判定、存檔）。
+8) 帳號與安全性注意
+- `AccountsManager` 目前使用 SHA256（無 salt）僅供示範，若要投入實際服務務必改用更安全的 hash（例如 PBKDF2、Argon2）並加上 salt 與適當的密碼策略。
 
-## 授權與貢獻條款
-- 此倉庫繼承上游授權（請確認 LICENSE 檔案）。PR 即表示你同意以專案所採用的授權方式貢獻程式碼。
+9) 本地開發建議
+- 如果你專注 UI：先改用 `SpriteFont` 與簡易按鈕元件以提升跨平台兼容性。
+- 如果你專注音訊/同步：在不同硬體上測試音軌延遲與同步行為，考慮使用更精準的時間基準。
 
-## 聯絡
-- 有任何問題請在 issue 中提出，或在 PR 中標註 Maintainers。
+10) 聯絡與支援
+- 請透過 Issue 提問或送 PR，維護者會在收到變更請求後回覆。
+
+謝謝你的貢獻！
