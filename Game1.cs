@@ -16,7 +16,7 @@ namespace ClickerGame
         Texture2D? pixel;
         int width = 800, height = 600;
         Beatmap? beatmap;
-        List<Note> notes = new();
+        LinkedList<Note> notes = new();
         SoundEffect? songEffect;
         SoundEffectInstance? songInstance;
         Stopwatch stopwatch = new Stopwatch();
@@ -28,7 +28,7 @@ namespace ClickerGame
         int currentSongIndex = 0;
         string currentDifficulty = "easy";
         bool editorMode = false;
-        
+
         // Menu / scene
         enum GameState { Menu, Playing, Result, Account }
         GameState state = GameState.Menu;
@@ -37,17 +37,25 @@ namespace ClickerGame
 
         TextRenderer? textRenderer;
         Texture2D? circleTexture;
-        
+
         // input feedback
-        record KeyFlash(Rectangle Rect, Color Color, float TimeToLive);
+        public class KeyFlash
+        {
+            public Rectangle Rect;
+            public Color Color;
+            public float TimeToLive;
+            public void Reset(Rectangle rect, Color color, float ttl) { Rect = rect; Color = color; TimeToLive = ttl; }
+        }
         List<KeyFlash> keyFlashes = new();
-        
+        ObjectPool<KeyFlash>? keyFlashPool;
+
         // result / scoring
         int maxScore = 0;
         bool summaryShown = false;
         int resultMenuIndex = 0;
 
         double songDurationSeconds = 0.0;
+        RenderCache? renderCache;
 
         // account manager
         AccountsManager? accountsManager;
@@ -89,6 +97,16 @@ namespace ClickerGame
 
             textRenderer = new TextRenderer(GraphicsDevice);
             circleTexture = CreateCircleTexture(256, Color.CornflowerBlue);
+
+            renderCache = new RenderCache(GraphicsDevice);
+            keyFlashPool = new ObjectPool<KeyFlash>(() => new KeyFlash(), 16);
+
+            // Precache common UI text to avoid runtime System.Drawing overhead
+            foreach (var m in menuOptions) textRenderer.Precache(m, "Arial", 22, Color.White);
+            textRenderer.Precache("Result", "Arial", 36, Color.White);
+            textRenderer.Precache("Score: 0/0", "Arial", 22, Color.LightGray);
+            textRenderer.Precache("▶", "Arial", 64, Color.White);
+            textRenderer.Precache("↑↓選擇 Enter確認 Esc離開", "Arial", 13, Color.White);
 
             Directory.CreateDirectory("Assets");
 
@@ -207,7 +225,7 @@ namespace ClickerGame
         {
             var beatmapJson = File.ReadAllText(beatmapPath);
             beatmap = Beatmap.LoadFromString(beatmapJson);
-            notes = new List<Note>(beatmap.Notes);
+            notes = new LinkedList<Note>(beatmap.Notes ?? new List<Note>());
             maxScore = (beatmap?.Notes?.Count ?? 0) * 100;
 
             songInstance?.Stop();
@@ -375,27 +393,30 @@ namespace ClickerGame
                     {
                         // place a new note at current time
                         var n = new Note { Time = time, Column = c };
-                        notes.Add(n);
+                        notes.AddLast(n);
                     }
                     else
                     {
                                 // play mode: try hit nearest note (loosened window)
                                 Note? nearest = null;
+                                LinkedListNode<Note>? nearestNode = null;
                                 float best = float.MaxValue;
                                 const float hitWindow = 0.30f;
-                                foreach (var n in notes)
+                                for (var node = notes.First; node != null; node = node.Next)
                                 {
+                                    var n = node.Value;
                                     if (n.Column != c) continue;
                                     float dt = Math.Abs(n.Time - time);
                                     if (dt <= hitWindow && dt < best)
                                     {
                                         best = dt;
                                         nearest = n;
+                                        nearestNode = node;
                                     }
                                 }
-                                if (nearest != null)
+                                if (nearestNode != null)
                                 {
-                                    notes.Remove(nearest);
+                                    notes.Remove(nearestNode);
                                     score += 100;
                                 }
                     }
@@ -406,12 +427,17 @@ namespace ClickerGame
                     int x = c * colW + 10;
                     int y = height - 120;
                     var rect = new Rectangle(x, y, colW - 20, 120);
-                    keyFlashes.Add(new KeyFlash(rect, Color.White, 0.25f));
+                    if (keyFlashPool != null)
+                    {
+                        var k = keyFlashPool.Rent();
+                        k.Reset(rect, Color.White, GameConfig.KeyFlashDuration);
+                        keyFlashes.Add(k);
+                    }
                 }
             }
 
             // Save beatmap in editor: S
-            if (editorMode && kb.IsKeyDown(Keys.S) && !prevKb.IsKeyDown(Keys.S))
+                if (editorMode && kb.IsKeyDown(Keys.S) && !prevKb.IsKeyDown(Keys.S))
             {
                 var bm = new Beatmap { Notes = new List<Note>(notes) };
                 string songId = songs.Count > 0 ? songs[currentSongIndex].Id : "song";
@@ -450,171 +476,183 @@ namespace ClickerGame
 
         protected override void Draw(GameTime gameTime)
         {
-            GraphicsDevice.Clear(Color.CornflowerBlue);
+            GraphicsDevice.Clear(Color.MediumPurple);
+
             spriteBatch!.Begin();
-            int cols = 4;
-            int colW = width / cols;
-            float time = (float)stopwatch.Elapsed.TotalSeconds;
 
-            for (int i = 0; i < cols; i++)
+            // background (cached)
+            if (renderCache != null)
             {
-                Rectangle r = new Rectangle(i * colW, height - 120, colW - 4, 120);
-                spriteBatch!.Draw(pixel!, r, Color.DarkSlateGray);
+                var bg = renderCache.GetBackground(width, height);
+                spriteBatch.Draw(bg, new Rectangle(0, 0, width, height), Color.White);
             }
-
-            float approachTime = 1.5f;
-            for (int ni = notes.Count - 1; ni >= 0; ni--)
+            else
             {
-                var n = notes[ni];
-            {
-                    float t = n.Time - time;
-                    // if note has passed far beyond (miss), remove it and show miss flash
-                    if (time - n.Time > approachTime + 0.75f)
-                    {
-                        notes.RemoveAt(ni);
-                        // small miss flash at column
-                        int mx = n.Column * colW + 10;
-                        var r = new Rectangle(mx, height - 120, colW - 20, 120);
-                        keyFlashes.Add(new KeyFlash(r, Color.Red, 0.35f));
-                        continue;
-                    }
-
-                    float progress = (approachTime - t) / (approachTime + 0.01f);
-                    int x = n.Column * colW + 10;
-                    int y = (int)(MathHelper.Clamp(progress, 0f, 1f) * (height - 160));
-                    Rectangle nr = new Rectangle(x, y, colW - 20, 20);
-                    spriteBatch!.Draw(pixel!, nr, editorMode ? Color.Yellow : Color.OrangeRed);
-            }
-            }
-            // draw key flashes (fade out)
-            for (int i = keyFlashes.Count - 1; i >= 0; i--)
-            {
-                var k = keyFlashes[i];
-                float alpha = Math.Clamp(k.TimeToLive / 0.25f, 0f, 1f);
-                spriteBatch!.Draw(pixel!, k.Rect, k.Color * alpha);
-                // decrease TTL
-                keyFlashes[i] = k with { TimeToLive = k.TimeToLive - (float)gameTime.ElapsedGameTime.TotalSeconds };
-                if (keyFlashes[i].TimeToLive <= 0f) keyFlashes.RemoveAt(i);
-            }
-
-            Rectangle scoreBar = new Rectangle(10, 10, Math.Min(600, score), 20);
-            spriteBatch!.Draw(pixel!, scoreBar, Color.LawnGreen);
-
-            // UI overlays
-            string ui = editorMode ? $"EDITOR MODE - Song: { (songs.Count>0 ? songs[currentSongIndex].Title : "Default") } - Press S to save" : $"PLAY MODE - Song: { (songs.Count>0 ? songs[currentSongIndex].Title : "Default") }";
-            // simple debug text not using SpriteFont: draw a thin bar background and not actual text for simplicity
-            Rectangle uiBg = new Rectangle(10, 40, 600, 22);
-            spriteBatch!.Draw(pixel!, uiBg, Color.Black * 0.5f);
-            spriteBatch!.End();
-            
-            // draw menu overlay when not playing
-            if (state == GameState.Menu)
-            {
-                spriteBatch!.Begin();
-                // background gradient
+                // fallback: simple gradient fill (rare)
                 for (int y = 0; y < height; y += 4)
                 {
                     float t = (float)y / (height - 1);
-                    var cTop = Color.DarkSlateBlue;
-                    var cBottom = Color.CornflowerBlue;
+                    var cTop = new Color(180, 120, 255);
+                    var cBottom = new Color(80, 180, 255);
                     var lerp = new Color(
                         (byte)(cTop.R + (cBottom.R - cTop.R) * t),
                         (byte)(cTop.G + (cBottom.G - cTop.G) * t),
                         (byte)(cTop.B + (cBottom.B - cTop.B) * t)
                     );
-                    spriteBatch!.Draw(pixel!, new Rectangle(0, y, width, 4), lerp);
+                    spriteBatch.Draw(pixel!, new Rectangle(0, y, width, 4), lerp);
+                }
+            }
+
+            // Gameplay: notes + flashes + score
+            if (state == GameState.Playing || editorMode)
+            {
+                int cols = 4;
+                int colW = width / cols;
+                float time = (float)stopwatch.Elapsed.TotalSeconds;
+
+                for (int i = 0; i < cols; i++)
+                {
+                    Rectangle r = new Rectangle(i * colW, height - 120, colW - 4, 120);
+                    spriteBatch.Draw(pixel!, r, Color.DarkSlateGray * 0.7f);
                 }
 
-                // title with modern central play button (osu!-like)
+                for (var node = notes.Last; node != null; )
+                {
+                    var prev = node.Previous;
+                    var n = node.Value;
+                    float t = n.Time - time;
+                    if (time - n.Time > GameConfig.ApproachTime + 0.75f)
+                    {
+                        notes.Remove(node);
+                        int mx = n.Column * colW + 10;
+                        var r = new Rectangle(mx, height - 120, colW - 20, 120);
+                        if (keyFlashPool != null)
+                        {
+                            var k = keyFlashPool.Rent();
+                            k.Reset(r, Color.Red, GameConfig.MissFlashDuration);
+                            keyFlashes.Add(k);
+                        }
+                        node = prev;
+                        continue;
+                    }
+                    float progress = (GameConfig.ApproachTime - t) / (GameConfig.ApproachTime + 0.01f);
+                    int x = n.Column * colW + 10;
+                    int y = (int)(MathHelper.Clamp(progress, 0f, 1f) * (height - 160));
+                    Rectangle nr = new Rectangle(x, y, colW - 20, 20);
+                    spriteBatch.Draw(pixel!, nr, editorMode ? Color.Yellow : Color.OrangeRed);
+                    node = prev;
+                }
+
+                // key flashes
+                for (int i = keyFlashes.Count - 1; i >= 0; i--)
+                {
+                    var k = keyFlashes[i];
+                    float alpha = Math.Clamp(k.TimeToLive / GameConfig.KeyFlashDuration, 0f, 1f);
+                    spriteBatch.Draw(pixel!, k.Rect, k.Color * alpha);
+                    k.TimeToLive -= (float)gameTime.ElapsedGameTime.TotalSeconds;
+                    if (k.TimeToLive <= 0f)
+                    {
+                        keyFlashes.RemoveAt(i);
+                        keyFlashPool?.Return(k);
+                    }
+                }
+
+                Rectangle scoreBar = new Rectangle(10, 10, Math.Min(600, score), 20);
+                spriteBatch.Draw(pixel!, scoreBar, Color.LawnGreen);
+            }
+
+            // Menu
+            if (state == GameState.Menu)
+            {
                 int centerX = width / 2;
                 int centerY = height / 2 - 40;
                 int circleSize = Math.Min(300, Math.Min(width, height) / 3);
                 var circle = circleTexture!;
                 int cx = centerX - circleSize / 2;
                 int cy = centerY - circleSize / 2;
-                // draw subtle shadow
-                spriteBatch!.Draw(circle, new Rectangle(cx + 6, cy + 8, circleSize, circleSize), Color.Black * 0.25f);
-                // main button
-                spriteBatch!.Draw(circle, new Rectangle(cx, cy, circleSize, circleSize), Color.CornflowerBlue);
-                // play triangle inside
-                var playTex = textRenderer!.GetTexture("▶", "Arial", 48, Color.White);
-                spriteBatch!.Draw(playTex, new Rectangle(centerX - playTex.Width / 2, centerY - playTex.Height / 2, playTex.Width, playTex.Height), Color.White);
+                for (int glow = 1; glow <= 6; glow++)
+                {
+                    float alpha = 0.08f * (7 - glow);
+                    int size = circleSize + glow * 18;
+                    spriteBatch.Draw(circle, new Rectangle(centerX - size / 2, centerY - size / 2, size, size), Color.White * alpha);
+                }
+                spriteBatch.Draw(circle, new Rectangle(cx, cy, circleSize, circleSize), new Color(255, 120, 255));
+                spriteBatch.Draw(circle, new Rectangle(cx, cy, circleSize, circleSize), Color.White * 0.08f);
+                var playTex = textRenderer!.GetTexture("▶", "Arial", 64, Color.White);
+                spriteBatch.Draw(playTex, new Rectangle(centerX - playTex.Width / 2, centerY - playTex.Height / 2, playTex.Width, playTex.Height), Color.White);
 
-                // small options below as rounded rectangles
-                int optW = 220; int optH = 48; int gap = 18;
+                int optW = 240; int optH = 54; int gap = 22;
                 int optX = centerX - optW / 2;
-                int optY = centerY + circleSize / 2 + 20;
+                int optY = centerY + circleSize / 2 + 24;
                 for (int i = 0; i < menuOptions.Length; i++)
                 {
                     bool sel = i == currentMenuIndex;
-                    var bg = sel ? Color.White * 0.12f : Color.Black * 0.08f;
-                    spriteBatch!.Draw(pixel!, new Rectangle(optX, optY + i * (optH + gap), optW, optH), bg);
-                    var tex = textRenderer!.GetTexture(menuOptions[i], "Arial", 20, sel ? Color.White : Color.LightGray);
-                    spriteBatch!.Draw(tex, new Rectangle(optX + 18, optY + i * (optH + gap) + (optH - tex.Height) / 2, tex.Width, tex.Height), Color.White);
+                    var bg = sel ? new Color(255, 120, 255) * 0.32f : Color.White * 0.10f;
+                    Rectangle btnRect = new Rectangle(optX, optY + i * (optH + gap), optW, optH);
+                    spriteBatch.Draw(pixel!, btnRect, bg);
+                    int r = optH / 2;
+                    spriteBatch.Draw(circle, new Rectangle(btnRect.Left - r, btnRect.Top, optH, optH), bg);
+                    spriteBatch.Draw(circle, new Rectangle(btnRect.Right - r, btnRect.Top, optH, optH), bg);
+                    var tex = textRenderer!.GetTexture(menuOptions[i], "Arial", 22, sel ? Color.White : Color.LightGray);
+                    var shadow = textRenderer!.GetTexture(menuOptions[i], "Arial", 22, Color.Black * 0.4f);
+                    spriteBatch.Draw(shadow, new Rectangle(optX + 22 + 2, optY + i * (optH + gap) + (optH - tex.Height) / 2 + 2, tex.Width, tex.Height), Color.White);
+                    spriteBatch.Draw(tex, new Rectangle(optX + 22, optY + i * (optH + gap) + (optH - tex.Height) / 2, tex.Width, tex.Height), Color.White);
                 }
-
-                // footer hint
-                var hint = textRenderer!.GetTexture("Use Up/Down and Enter (Esc to exit)", "Arial", 12, Color.LightGray);
-                spriteBatch!.Draw(hint, new Rectangle((width - hint.Width) / 2, height - 48, hint.Width, hint.Height), Color.White);
-                spriteBatch!.End();
+                var hint = textRenderer!.GetTexture("↑↓選擇 Enter確認 Esc離開", "Arial", 13, Color.White);
+                var hintShadow = textRenderer!.GetTexture("↑↓選擇 Enter確認 Esc離開", "Arial", 13, Color.Black * 0.4f);
+                spriteBatch.Draw(hintShadow, new Rectangle((width - hint.Width) / 2 + 2, height - 48 + 2, hint.Width, hint.Height), Color.White);
+                spriteBatch.Draw(hint, new Rectangle((width - hint.Width) / 2, height - 48, hint.Width, hint.Height), Color.White);
             }
 
-            // draw result overlay
+            // Result overlay
             if (state == GameState.Result)
             {
-                spriteBatch!.Begin();
-                spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.6f);
+                spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.6f);
                 var title = textRenderer!.GetTexture("Result", "Arial", 36, Color.White);
-                spriteBatch!.Draw(title, new Rectangle((width - title.Width) / 2, 100, title.Width, title.Height), Color.White);
+                spriteBatch.Draw(title, new Rectangle((width - title.Width) / 2, 100, title.Width, title.Height), Color.White);
                 var scoreTex = textRenderer!.GetTexture($"Score: {score}/{maxScore}", "Arial", 22, Color.LightGray);
-                spriteBatch!.Draw(scoreTex, new Rectangle((width - scoreTex.Width) / 2, 160, scoreTex.Width, scoreTex.Height), Color.White);
+                spriteBatch.Draw(scoreTex, new Rectangle((width - scoreTex.Width) / 2, 160, scoreTex.Width, scoreTex.Height), Color.White);
                 var gradeTex = textRenderer!.GetTexture($"Grade: {resultGrade}", "Arial", 28, Color.Yellow);
-                spriteBatch!.Draw(gradeTex, new Rectangle((width - gradeTex.Width) / 2, 200, gradeTex.Width, gradeTex.Height), Color.White);
-
+                spriteBatch.Draw(gradeTex, new Rectangle((width - gradeTex.Width) / 2, 200, gradeTex.Width, gradeTex.Height), Color.White);
                 string[] opts = new[] { "Retry", "Menu" };
                 for (int i = 0; i < opts.Length; i++)
                 {
                     var col = i == resultMenuIndex ? Color.White : Color.LightGray;
                     var t = textRenderer!.GetTexture(opts[i], "Arial", 20, col);
-                    spriteBatch!.Draw(t, new Rectangle((width - t.Width) / 2, 280 + i * 40, t.Width, t.Height), Color.White);
+                    spriteBatch.Draw(t, new Rectangle((width - t.Width) / 2, 280 + i * 40, t.Width, t.Height), Color.White);
                 }
-                spriteBatch!.End();
             }
 
-            // draw account overlay
+            // Account overlay
             if (state == GameState.Account)
             {
-                spriteBatch!.Begin();
-                spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.6f);
+                spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.6f);
                 var title = textRenderer!.GetTexture("Account Register", "Arial", 28, Color.White);
-                spriteBatch!.Draw(title, new Rectangle((width - title.Width) / 2, 100, title.Width, title.Height), Color.White);
-
+                spriteBatch.Draw(title, new Rectangle((width - title.Width) / 2, 100, title.Width, title.Height), Color.White);
                 var uLabel = textRenderer!.GetTexture("Username:", "Arial", 18, Color.LightGray);
-                spriteBatch!.Draw(uLabel, new Rectangle((width - 400) / 2, 160, uLabel.Width, uLabel.Height), Color.White);
+                spriteBatch.Draw(uLabel, new Rectangle((width - 400) / 2, 160, uLabel.Width, uLabel.Height), Color.White);
                 var uBox = new Rectangle((width - 400) / 2, 190, 400, 36);
-                spriteBatch!.Draw(pixel!, uBox, accountFieldIndex == 0 ? Color.White * 0.12f : Color.Black * 0.1f);
+                spriteBatch.Draw(pixel!, uBox, accountFieldIndex == 0 ? Color.White * 0.12f : Color.Black * 0.1f);
                 var uText = textRenderer!.GetTexture(accountUsername + (accountFieldIndex == 0 ? "|" : ""), "Arial", 18, Color.White);
-                spriteBatch!.Draw(uText, new Rectangle(uBox.X + 8, uBox.Y + 6, uText.Width, uText.Height), Color.White);
-
+                spriteBatch.Draw(uText, new Rectangle(uBox.X + 8, uBox.Y + 6, uText.Width, uText.Height), Color.White);
                 var pLabel = textRenderer!.GetTexture("Password:", "Arial", 18, Color.LightGray);
-                spriteBatch!.Draw(pLabel, new Rectangle((width - 400) / 2, 240, pLabel.Width, pLabel.Height), Color.White);
+                spriteBatch.Draw(pLabel, new Rectangle((width - 400) / 2, 240, pLabel.Width, pLabel.Height), Color.White);
                 var pBox = new Rectangle((width - 400) / 2, 270, 400, 36);
-                spriteBatch!.Draw(pixel!, pBox, accountFieldIndex == 1 ? Color.White * 0.12f : Color.Black * 0.1f);
+                spriteBatch.Draw(pixel!, pBox, accountFieldIndex == 1 ? Color.White * 0.12f : Color.Black * 0.1f);
                 var masked = new string('*', accountPassword.Length);
                 var pText = textRenderer!.GetTexture(masked + (accountFieldIndex == 1 ? "|" : ""), "Arial", 18, Color.White);
-                spriteBatch!.Draw(pText, new Rectangle(pBox.X + 8, pBox.Y + 6, pText.Width, pText.Height), Color.White);
-
+                spriteBatch.Draw(pText, new Rectangle(pBox.X + 8, pBox.Y + 6, pText.Width, pText.Height), Color.White);
                 var hint = textRenderer!.GetTexture("Type and press Enter to register (Tab to switch). Esc to cancel.", "Arial", 12, Color.LightGray);
-                spriteBatch!.Draw(hint, new Rectangle((width - hint.Width) / 2, pBox.Y + 56, hint.Width, hint.Height), Color.White);
-
+                spriteBatch.Draw(hint, new Rectangle((width - hint.Width) / 2, pBox.Y + 56, hint.Width, hint.Height), Color.White);
                 if (accountShowMessage)
                 {
                     var m = textRenderer!.GetTexture(accountMessage, "Arial", 14, Color.Yellow);
-                    spriteBatch!.Draw(m, new Rectangle((width - m.Width) / 2, pBox.Y + 86, m.Width, m.Height), Color.White);
+                    spriteBatch.Draw(m, new Rectangle((width - m.Width) / 2, pBox.Y + 86, m.Width, m.Height), Color.White);
                 }
-
-                spriteBatch!.End();
             }
+
+            spriteBatch.End();
+
             base.Draw(gameTime);
         }
 
