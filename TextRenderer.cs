@@ -51,6 +51,12 @@ namespace ClickerGame
             return tex;
         }
 
+        // Ensure a texture is generated and cached for the given text.
+        public void Precache(string text, string fontName, int size, Microsoft.Xna.Framework.Color color)
+        {
+            GetTexture(text, fontName, size, color);
+        }
+
         public void Dispose()
         {
             foreach (var t in _cache.Values) t.Dispose();
