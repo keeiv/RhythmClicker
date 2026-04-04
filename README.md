@@ -1,29 +1,47 @@
 # RhythmClicker — 節奏遊戲
 
-> **這是第一個測試版（v0.1-alpha）。** 遊戲仍在開發中，歡迎回報問題與建議。
+> **最新版本：v0.2-beta** — Blue Archive 風格音樂、Discord 整合、統計系統、譜面編輯器等重大更新。
 
-一款使用 MonoGame (DesktopGL) 建置的節奏遊戲，具備現代化暗色 UI、多語言支援（English / 繁中-台灣 / 簡中-中國大陸 / 繁中-香港 / English-US）以及帳號系統。
+一款使用 MonoGame (DesktopGL) 建置的 4 軌落鍵節奏遊戲。具備現代化暗色 UI、5 語言支援、帳號系統與 Discord Rich Presence。
 
 ## 下載
 
-👉 **[下載最新版本 (Windows x64)](https://github.com/keeiv/RhythmClicker/releases/latest)** — 解壓縮後直接執行 `ClickerGame.exe`，不需安裝 .NET。
+**[下載最新版本 (Windows x64)](https://github.com/keeiv/RhythmClicker/releases/latest)** — 解壓縮後直接執行 `ClickerGame.exe`，不需安裝 .NET。
 
-請參閱 `DEVELOPMENT.md` 與 `CONTRIBUTING.md` 取得建置、執行與協作說明。
+## v0.2-beta 新功能
 
-快速開始（Windows）
-1. 取得此 repository：`git clone https://github.com/keeiv/RhythmClicker.git`
-2. 建置：
-```
-dotnet build RhythmClicker/ClickerGame.csproj -c Debug
-```
-3. 執行：
-```
-dotnet run --project RhythmClicker/ClickerGame.csproj -c Debug
+- **Blue Archive 風格音樂** — 3 首合成原創歌曲（Unwelcome School / Constant Moderato / Midsummer Daydream）
+- **Discord Rich Presence** — 自動顯示遊戲狀態於 Discord
+- **SQLite 統計系統** — 玩家遊玩記錄、等級分佈、最佳成績
+- **譜面編輯器** — 滑鼠拖曳放置方塊、匯入音檔、驗證與存儲
+- **4 難度** — EZ / HD / DIFF / VDIFF，左右鍵快速切換
+- **帳號系統** — 本機登入/註冊 + AES-256-CBC 加密
+- **UI 現代化** — 扁平按鈕、Pill 標籤、更線條化的版面
+
+## 快速開始
+
+```bash
+git clone https://github.com/keeiv/RhythmClicker.git
+cd RhythmClicker
+dotnet restore ClickerGame/ClickerGame.csproj
+dotnet run --project ClickerGame/ClickerGame.csproj
 ```
 
-跨平台注意事項
-- `TextRenderer.cs` 使用 `System.Drawing.Common`（目前主要在 Windows 測試）；若要跨平台建議改用 MonoGame `SpriteFont`。
+> 首次啟動會自動產生音訊與譜面，需等待數秒。
 
-回報問題或貢獻
-- 想貢獻請先閱讀 `CONTRIBUTING.md`，有任何錯誤或改善建議請開 issue。
+## 操作方式
+
+| 按鍵 | 功能 |
+|------|------|
+| `D` `F` `J` `K` | 打擊四欄位 |
+| `◀` `▶` | 切換難度 |
+| `Tab` | 切換歌曲 |
+| `↑` `↓` `Enter` | 選單導航 |
+| `Esc` | 返回 / 離開 |
+
+詳細操作與譜面編輯器使用說明請參閱 [`ClickerGame/README.md`](ClickerGame/README.md)。
+
+## 回報問題或貢獻
+
+想貢獻請先閱讀 `CONTRIBUTING.md`，有任何錯誤或改善建議請開 issue。
 

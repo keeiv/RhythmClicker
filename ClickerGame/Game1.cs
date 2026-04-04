@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Diagnostics;
 using System.Collections.Generic;
+using System.Linq;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -19,27 +20,32 @@ namespace ClickerGame
         LinkedList<Note> notes = new();
         SoundEffect? songEffect;
         SoundEffectInstance? songInstance;
+
+        // Menu background music
+        SoundEffect? menuMusicEffect;
+        SoundEffectInstance? menuMusicInstance;
+
         Stopwatch stopwatch = new Stopwatch();
         int score = 0;
         KeyboardState kb, prevKb;
+        MouseState mouseState, prevMouseState;
+        int prevScrollValue;
 
-        // Song selection and editor
+        // Song selection
         List<SongInfo> songs = new();
         int currentSongIndex = 0;
         string currentDifficulty = "easy";
-        bool editorMode = false;
 
         // Menu / scene
-        enum GameState { Menu, Playing, Result, Account, Language }
+        enum GameState { Menu, Playing, Result, Account, Language, Stats, BeatmapEditor }
         GameState state = GameState.Menu;
-        // Menu keys used for logic branching; display text comes from Localization
-        string[] menuKeys = new[] { "menu_start", "menu_editor", "menu_account", "menu_language", "menu_exit" };
+        string[] menuKeys = new[] { "menu_start", "menu_editor", "menu_stats", "menu_account", "menu_language", "menu_exit" };
         int currentMenuIndex = 0;
 
         // Language selection
         int languageMenuIndex = 0;
 
-        // Saved windowed dimensions for restoring from borderless fullscreen
+        // Saved windowed dimensions
         int windowedWidth = 800;
         int windowedHeight = 600;
 
@@ -53,51 +59,87 @@ namespace ClickerGame
             public Color Color;
             public float TimeToLive;
             public void Reset(Rectangle rect, Color color, float ttl)
-            {
-                Rect = rect;
-                Color = color;
-                TimeToLive = ttl;
-            }
+            { Rect = rect; Color = color; TimeToLive = ttl; }
         }
         List<KeyFlash> keyFlashes = new();
         ObjectPool<KeyFlash>? keyFlashPool;
 
-        // result / scoring
+        // result
         int maxScore = 0;
         bool summaryShown = false;
         int resultMenuIndex = 0;
-
         double songDurationSeconds = 0.0;
         RenderCache? renderCache;
 
-        // account manager
+        // account
         AccountsManager? accountsManager;
         string accountUsername = string.Empty;
         string accountPassword = string.Empty;
         bool accountShowMessage = false;
         string accountMessage = string.Empty;
         int accountFieldIndex = 0;
+        bool accountIsLoginMode = true;
 
-        // result grade
         string resultGrade = "";
 
-        // Combo and match stats
+        // Combo/stats
         int combo = 0;
         int maxCombo = 0;
         int hitCount = 0;
         int missCount = 0;
 
-        // Note column colors (neon palette)
-        static readonly Color[] NoteColors = new[]
+        // Systems
+        StatsDatabase? statsDb;
+        DiscordRpcManager? discordRpc;
+
+        // Difficulty abbreviation mapping
+        static readonly Dictionary<string, string> DiffAbbrev = new()
         {
-            new Color(0, 200, 255),
-            new Color(255, 60, 140),
-            new Color(255, 220, 50),
-            new Color(80, 255, 120),
+            ["easy"] = "EZ",
+            ["hard"] = "HD",
+            ["difficulty"] = "DIFF",
+            ["very_difficulty"] = "VDIFF",
         };
+
+        static string DiffShort(string d) => DiffAbbrev.TryGetValue(d, out var s) ? s : d.ToUpper();
+
+        // Note colors
+        static readonly Color[] NoteColors = { new(0, 200, 255), new(255, 60, 140), new(255, 220, 50), new(80, 255, 120) };
         static readonly string[] LaneKeys = { "D", "F", "J", "K" };
 
-        // Lane layout constants
+        // Judgment popup
+        class JudgmentPopup { public string Text = ""; public Color Color; public float Timer; public Vector2 Position; }
+        List<JudgmentPopup> judgmentPopups = new();
+
+        // Particles
+        class HitParticle { public Vector2 Pos, Vel; public Color Color; public float Life, MaxLife, Size; }
+        List<HitParticle> particles = new();
+        Random rng = new();
+
+        float shakeTimer;
+        float shakeIntensity;
+        float beatPulseAlpha;
+        SoundEffect? sfxHit;
+        SoundEffect? sfxMiss;
+
+        // Combo tier
+        int ComboTier => combo >= GameConfig.ComboTier4 ? 4
+                       : combo >= GameConfig.ComboTier3 ? 3
+                       : combo >= GameConfig.ComboTier2 ? 2
+                       : combo >= GameConfig.ComboTier1 ? 1 : 0;
+
+        static readonly Color[][] TierNoteColors = new[]
+        {
+            new[] { new Color(0, 200, 255), new Color(255, 60, 140), new Color(255, 220, 50), new Color(80, 255, 120) },
+            new[] { new Color(0, 255, 200), new Color(100, 255, 150), new Color(50, 255, 255), new Color(150, 255, 100) },
+            new[] { new Color(200, 255, 0), new Color(255, 255, 50), new Color(150, 255, 0), new Color(255, 200, 0) },
+            new[] { new Color(255, 180, 0), new Color(255, 140, 0), new Color(255, 220, 50), new Color(255, 120, 0) },
+            new[] { new Color(255, 50, 100), new Color(255, 0, 180), new Color(255, 100, 50), new Color(255, 30, 220) },
+        };
+
+        static readonly Color[] TierGlowColor = { new(0,200,255), new(0,255,180), new(200,255,0), new(255,180,0), new(255,50,100) };
+
+        // Lane layout
         const int LaneCount = 4;
         const int LaneWidth = 90;
         const int TotalLaneWidth = LaneCount * LaneWidth;
@@ -106,8 +148,32 @@ namespace ClickerGame
         int LaneLeft => (width - TotalLaneWidth) / 2;
         int HitZoneY => height - HitZoneHeight - 40;
 
-        // Menu animation
         float menuTimer = 0f;
+        bool editorMode = false; // legacy playing-editor flag
+
+        // ═══════════ Beatmap Editor State ═══════════
+        string edSongName = "";
+        string edAuthor = "";
+        string edAudioPath = "";
+        string edBpm = "120";
+        List<Note> edNotes = new();
+        float edScrollTime = 0f; // current scroll position in seconds
+        float edTotalTime = 10f;
+        int edFieldFocus = -1; // -1=timeline, 0=name, 1=author, 2=audio, 3=bpm
+        string edMessage = "";
+        float edMessageTimer = 0f;
+        Note? edDragging = null;
+        bool edPreviewing = false;
+        SoundEffect? edPreviewEffect;
+        SoundEffectInstance? edPreviewInstance;
+        Stopwatch edPreviewWatch = new();
+
+        float EdPixelsPerSecond => (height - 120) / 4f; // 4 seconds visible at once
+        float EdVisibleSeconds => (height - 120) / EdPixelsPerSecond;
+
+        // Stats cached
+        PlayerSummary? cachedStats;
+        List<PlayRecord>? cachedRecent;
 
         class SongInfo
         {
@@ -128,8 +194,45 @@ namespace ClickerGame
         protected override void Initialize()
         {
             IsMouseVisible = true;
-            Window.Title = "CLICK - Rhythm Game";
+            Window.Title = "RhythmClicker";
+            Window.AllowUserResizing = false;
+
+            // File drop for editor audio import
+            Window.FileDrop += OnFileDrop;
+
             base.Initialize();
+        }
+
+        void OnFileDrop(object? sender, FileDropEventArgs e)
+        {
+            if (state != GameState.BeatmapEditor || e.Files == null || e.Files.Length == 0) return;
+            string f = e.Files[0];
+            string ext = Path.GetExtension(f).ToLowerInvariant();
+            if (ext == ".wav" || ext == ".ogg" || ext == ".mp3")
+            {
+                edAudioPath = f;
+                // Try to determine duration
+                try
+                {
+                    using var fs = File.OpenRead(f);
+                    using var se = SoundEffect.FromStream(fs);
+                    edTotalTime = (float)se.Duration.TotalSeconds + 1f;
+                }
+                catch { }
+            }
+            else if (ext == ".rcm")
+            {
+                // Import existing beatmap
+                try
+                {
+                    var bm = RcFileManager.ReadBeatmap(f);
+                    edNotes = bm.Notes ?? new List<Note>();
+                    if (!string.IsNullOrEmpty(bm.Name)) edSongName = bm.Name;
+                    if (!string.IsNullOrEmpty(bm.Author)) edAuthor = bm.Author;
+                    if (bm.Bpm > 0) edBpm = bm.Bpm.ToString("F0");
+                }
+                catch { }
+            }
         }
 
         protected override void LoadContent()
@@ -140,99 +243,160 @@ namespace ClickerGame
 
             textRenderer = new TextRenderer(GraphicsDevice);
             circleTexture = CreateCircleTexture(256, Color.White);
-
             renderCache = new RenderCache(GraphicsDevice);
             keyFlashPool = new ObjectPool<KeyFlash>(() => new KeyFlash(), 16);
 
-            // Precache common UI text (English defaults; others cached on demand)
+            sfxHit = GenerateHitSfx();
+            sfxMiss = GenerateMissSfx();
+
             textRenderer.Precache("CLICK", "Segoe UI", 56, Color.White);
             foreach (var lk in LaneKeys) textRenderer.Precache(lk, "Segoe UI", 18, new Color(180, 180, 200));
 
             Directory.CreateDirectory("Assets");
-
             EnsureExampleSongs();
 
             string songsMeta = "Assets/songs.json";
-            if (!File.Exists(songsMeta))
-            {
+            if (!File.Exists(songsMeta) || !File.Exists("Assets/.audio_v3"))
                 File.WriteAllText(songsMeta, DefaultSongsJson());
-            }
             var metaJson = File.ReadAllText(songsMeta);
             songs = System.Text.Json.JsonSerializer.Deserialize<List<SongInfo>>(metaJson,
-                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                ?? new List<SongInfo>();
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
 
             LoadCurrentSong();
             accountsManager = new AccountsManager();
+            statsDb = new StatsDatabase();
+
+            // Discord RPC
+            try { discordRpc = new DiscordRpcManager(); }
+            catch { discordRpc = null; }
+
+            // Menu music
+            string menuBgmPath = "Assets/menu_bgm.wav";
+            if (!File.Exists(menuBgmPath)) GenerateMenuMusicWav(menuBgmPath, 20.0f, 95f, 82.4);
+            using (var fs = File.OpenRead(menuBgmPath))
+            {
+                menuMusicEffect = SoundEffect.FromStream(fs);
+                menuMusicInstance = menuMusicEffect.CreateInstance();
+                menuMusicInstance.IsLooped = true;
+                menuMusicInstance.Volume = 0.35f;
+            }
+            menuMusicInstance.Play();
         }
 
         protected override void UnloadContent()
         {
             textRenderer?.Dispose();
+            statsDb?.Dispose();
+            discordRpc?.Dispose();
             base.UnloadContent();
         }
 
-        string DefaultBeatmapJson()
-        {
-            return @"{
-    ""notes"": [
-        { ""time"": 0.5, ""column"": 0 },
-        { ""time"": 0.9, ""column"": 1 },
-        { ""time"": 1.3, ""column"": 2 },
-        { ""time"": 1.7, ""column"": 3 }
-    ]
-}";
-        }
-
-        string DefaultSongsJson()
-        {
-            return @"[
-      { ""Id"": ""song1"", ""Title"": ""Example A"", ""File"": ""song1.wav"", ""Difficulties"": [""easy"", ""hard""] },
-      { ""Id"": ""song2"", ""Title"": ""Example B"", ""File"": ""song2.wav"", ""Difficulties"": [""easy""] },
-      { ""Id"": ""song3"", ""Title"": ""Example C"", ""File"": ""song3.wav"", ""Difficulties"": [""easy""] }
-    ]";
-        }
+        string DefaultSongsJson() => @"[
+  { ""Id"": ""song1"", ""Title"": ""Example A"", ""File"": ""song1.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty"", ""very_difficulty""] },
+  { ""Id"": ""song2"", ""Title"": ""Example B"", ""File"": ""song2.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty""] },
+  { ""Id"": ""song3"", ""Title"": ""Example C"", ""File"": ""song3.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty"", ""very_difficulty""] },
+  { ""Id"": ""ba_unwelcome"", ""Title"": ""Unwelcome School"", ""File"": ""ba_unwelcome.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty"", ""very_difficulty""] },
+  { ""Id"": ""ba_constant"", ""Title"": ""Constant Moderato"", ""File"": ""ba_constant.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty"", ""very_difficulty""] },
+  { ""Id"": ""ba_midsummer"", ""Title"": ""Midsummer Daydream"", ""File"": ""ba_midsummer.wav"", ""Difficulties"": [""easy"", ""hard"", ""difficulty"", ""very_difficulty""] }
+]";
 
         void EnsureExampleSongs()
         {
-            if (!File.Exists("Assets/song1.wav")) GenerateExampleWav("Assets/song1.wav", 8.0f, 440.0);
-            if (!File.Exists("Assets/song2.wav")) GenerateExampleWav("Assets/song2.wav", 6.0f, 523.25);
-            if (!File.Exists("Assets/song3.wav")) GenerateExampleWav("Assets/song3.wav", 10.0f, 349.23);
+            string marker = "Assets/.audio_v4";
+            if (File.Exists(marker)) return;
 
-            if (!File.Exists("Assets/song1_easy.json")) File.WriteAllText("Assets/song1_easy.json", DefaultBeatmapJson());
-            if (!File.Exists("Assets/song1_hard.json")) File.WriteAllText("Assets/song1_hard.json", @"{
-    ""notes"": [
-        { ""time"": 0.4, ""column"": 0 },{ ""time"": 0.6, ""column"": 1 },{ ""time"": 0.8, ""column"": 2 },{ ""time"": 1.0, ""column"": 3 },{ ""time"": 1.2, ""column"": 0 },{ ""time"": 1.4, ""column"": 1 }
-    ]
-}");
-            if (!File.Exists("Assets/song2_easy.json")) File.WriteAllText("Assets/song2_easy.json", DefaultBeatmapJson());
-            if (!File.Exists("Assets/song3_easy.json")) File.WriteAllText("Assets/song3_easy.json", DefaultBeatmapJson());
+            GenerateMusicalWav("Assets/song1.wav", 8.0f, 120f, 110.0);
+            GenerateMusicalWav("Assets/song2.wav", 6.0f, 130f, 130.8);
+            GenerateMusicalWav("Assets/song3.wav", 10.0f, 100f, 82.4);
+            GenerateMenuMusicWav("Assets/menu_bgm.wav", 20.0f, 95f, 82.4);
+
+            // Blue Archive style songs
+            GenerateBaStyleWav("Assets/ba_unwelcome.wav", 12.0f, 170f, 164.8, 0);  // Bright uptempo pop-rock
+            GenerateBaStyleWav("Assets/ba_constant.wav", 14.0f, 132f, 146.8, 1);   // Smooth piano pop
+            GenerateBaStyleWav("Assets/ba_midsummer.wav", 10.0f, 155f, 196.0, 2);  // Energetic electronic
+
+            string[][] allSongDiffs = {
+                new[] { "easy", "hard", "difficulty", "very_difficulty" },
+                new[] { "easy", "hard", "difficulty" },
+                new[] { "easy", "hard", "difficulty", "very_difficulty" },
+                new[] { "easy", "hard", "difficulty", "very_difficulty" },
+                new[] { "easy", "hard", "difficulty", "very_difficulty" },
+                new[] { "easy", "hard", "difficulty", "very_difficulty" },
+            };
+            float[][] songParams = {
+                new[] { 8.0f, 120f }, new[] { 6.0f, 130f }, new[] { 10.0f, 100f },
+                new[] { 12.0f, 170f }, new[] { 14.0f, 132f }, new[] { 10.0f, 155f },
+            };
+            string[] songIds = { "song1", "song2", "song3", "ba_unwelcome", "ba_constant", "ba_midsummer" };
+
+            for (int si = 0; si < songIds.Length; si++)
+            {
+                foreach (var d in allSongDiffs[si])
+                    WriteBeatmapRcm($"Assets/{songIds[si]}_{d}.rcm", songParams[si][0], songParams[si][1], d);
+            }
+
+            File.WriteAllText(marker, "v4");
+        }
+
+        void WriteBeatmapRcm(string path, float dur, float bpm, string diff)
+        {
+            var bm = GenerateBeatmapObject(dur, bpm, diff);
+            RcFileManager.WriteBeatmap(path, bm);
         }
 
         void LoadCurrentSong()
         {
             if (songs.Count == 0)
             {
-                if (!File.Exists("Assets/song.wav")) GenerateExampleWav("Assets/song.wav", 3.0f);
-                LoadSong("Assets/song.wav", "Assets/beatmap.json");
+                if (!File.Exists("Assets/song.wav")) GenerateMusicalWav("Assets/song.wav", 3.0f);
+                LoadSong("Assets/song.wav", "Assets/beatmap.rcm");
                 return;
             }
             var s = songs[Math.Clamp(currentSongIndex, 0, songs.Count - 1)];
             string songPath = Path.Combine("Assets", s.File);
-            if (!File.Exists(songPath)) GenerateExampleWav(songPath, 6.0f);
+            if (!File.Exists(songPath)) GenerateMusicalWav(songPath, 6.0f);
 
-            string beatmapPath = Path.Combine("Assets", s.Id + "_" + currentDifficulty + ".json");
-            if (!File.Exists(beatmapPath))
+            string rcmPath = Path.Combine("Assets", s.Id + "_" + currentDifficulty + ".rcm");
+            string jsonPath = Path.Combine("Assets", s.Id + "_" + currentDifficulty + ".json");
+
+            if (File.Exists(rcmPath)) { LoadSongRcm(songPath, rcmPath); return; }
+            if (File.Exists(jsonPath))
             {
-                foreach (var d in s.Difficulties)
-                {
-                    var p = Path.Combine("Assets", s.Id + "_" + d + ".json");
-                    if (File.Exists(p)) { beatmapPath = p; currentDifficulty = d; break; }
-                }
-                if (!File.Exists(beatmapPath)) File.WriteAllText(beatmapPath, DefaultBeatmapJson());
+                RcFileManager.MigrateJsonToRcm(jsonPath, rcmPath);
+                if (File.Exists(rcmPath)) { LoadSongRcm(songPath, rcmPath); return; }
+                LoadSong(songPath, jsonPath); return;
             }
+            foreach (var d in s.Difficulties)
+            {
+                var rp = Path.Combine("Assets", s.Id + "_" + d + ".rcm");
+                if (File.Exists(rp)) { currentDifficulty = d; LoadSongRcm(songPath, rp); return; }
+            }
+            var defBm = GenerateBeatmapObject(6.0f, 120f, currentDifficulty);
+            RcFileManager.WriteBeatmap(rcmPath, defBm);
+            LoadSongRcm(songPath, rcmPath);
+        }
 
-            LoadSong(songPath, beatmapPath);
+        void LoadSongRcm(string songFilePath, string rcmPath)
+        {
+            beatmap = RcFileManager.ReadBeatmap(rcmPath);
+            notes = new LinkedList<Note>(beatmap.Notes ?? new List<Note>());
+            maxScore = (beatmap?.Notes?.Count ?? 0) * 100;
+            songInstance?.Stop(); songInstance?.Dispose(); songEffect = null;
+            using (var fs = File.OpenRead(songFilePath))
+            { songEffect = SoundEffect.FromStream(fs); songInstance = songEffect.CreateInstance(); }
+            songDurationSeconds = songEffect?.Duration.TotalSeconds ?? 0.0;
+        }
+
+        void LoadSong(string songFilePath, string beatmapPath)
+        {
+            var json = File.ReadAllText(beatmapPath);
+            beatmap = Beatmap.LoadFromString(json);
+            notes = new LinkedList<Note>(beatmap.Notes ?? new List<Note>());
+            maxScore = (beatmap?.Notes?.Count ?? 0) * 100;
+            songInstance?.Stop(); songInstance?.Dispose(); songEffect = null;
+            using (var fs = File.OpenRead(songFilePath))
+            { songEffect = SoundEffect.FromStream(fs); songInstance = songEffect.CreateInstance(); }
+            songDurationSeconds = songEffect?.Duration.TotalSeconds ?? 0.0;
         }
 
         Texture2D CreateCircleTexture(int size, Color fill)
@@ -241,345 +405,509 @@ namespace ClickerGame
             var data = new Color[size * size];
             float r = size / 2f;
             for (int y = 0; y < size; y++)
-            {
                 for (int x = 0; x < size; x++)
                 {
-                    float dx = x + 0.5f - r;
-                    float dy = y + 0.5f - r;
+                    float dx = x + 0.5f - r, dy = y + 0.5f - r;
                     float d = (float)Math.Sqrt(dx * dx + dy * dy);
-                    float alpha = d < r - 1 ? 1f : d < r ? r - d : 0f;
-                    data[y * size + x] = new Color(fill.R, fill.G, fill.B, (byte)(fill.A * alpha));
+                    float a = d < r - 1 ? 1f : d < r ? r - d : 0f;
+                    data[y * size + x] = new Color(fill.R, fill.G, fill.B, (byte)(fill.A * a));
                 }
-            }
             tex.SetData(data);
             return tex;
         }
 
-        void LoadSong(string songFilePath, string beatmapPath)
-        {
-            var beatmapJson = File.ReadAllText(beatmapPath);
-            beatmap = Beatmap.LoadFromString(beatmapJson);
-            notes = new LinkedList<Note>(beatmap.Notes ?? new List<Note>());
-            maxScore = (beatmap?.Notes?.Count ?? 0) * 100;
-
-            songInstance?.Stop();
-            songInstance?.Dispose();
-            songEffect = null;
-            using (var fs = File.OpenRead(songFilePath))
-            {
-                songEffect = SoundEffect.FromStream(fs);
-                songInstance = songEffect.CreateInstance();
-            }
-            songDurationSeconds = songEffect?.Duration.TotalSeconds ?? 0.0;
-        }
-
-        void GenerateExampleWav(string path, float durationSeconds, double freq = 440.0)
-        {
-            int sampleRate = 44100;
-            int samples = (int)(sampleRate * durationSeconds);
-            using (var fs = new FileStream(path, FileMode.Create))
-            using (var bw = new BinaryWriter(fs))
-            {
-                int byteRate = sampleRate * 2;
-                int subchunk2 = samples * 2;
-                bw.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
-                bw.Write(36 + subchunk2);
-                bw.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
-                bw.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
-                bw.Write(16);
-                bw.Write((short)1);
-                bw.Write((short)1);
-                bw.Write(sampleRate);
-                bw.Write(byteRate);
-                bw.Write((short)2);
-                bw.Write((short)16);
-                bw.Write(System.Text.Encoding.ASCII.GetBytes("data"));
-                bw.Write(subchunk2);
-                for (int i = 0; i < samples; i++)
-                {
-                    short sample = (short)(Math.Sin(2 * Math.PI * freq * i / sampleRate) * short.MaxValue * 0.2);
-                    bw.Write(sample);
-                }
-            }
-        }
+        // ═══════════════════════════════════════════════════════════════
+        // UPDATE
+        // ═══════════════════════════════════════════════════════════════
 
         protected override void Update(GameTime gameTime)
         {
             kb = Keyboard.GetState();
+            mouseState = Mouse.GetState();
 
-            // Global escape handling for all states
+            // Escape handling
             if (kb.IsKeyDown(Keys.Escape) && !prevKb.IsKeyDown(Keys.Escape))
             {
                 if (state == GameState.Playing)
                 {
-                    songInstance?.Stop();
-                    stopwatch.Stop();
-                    state = GameState.Menu;
-                    ExitBorderlessFullscreen();
-                    prevKb = Keyboard.GetState();
-                    base.Update(gameTime);
-                    return;
+                    songInstance?.Stop(); stopwatch.Stop();
+                    state = GameState.Menu; ExitBorderlessFullscreen();
+                    menuMusicInstance?.Play(); discordRpc?.SetMenu();
                 }
                 else if (state == GameState.Result)
                 {
-                    state = GameState.Menu;
-                    ExitBorderlessFullscreen();
-                    prevKb = Keyboard.GetState();
-                    base.Update(gameTime);
-                    return;
+                    state = GameState.Menu; ExitBorderlessFullscreen();
+                    menuMusicInstance?.Play(); discordRpc?.SetMenu();
                 }
-                else if (state == GameState.Account || state == GameState.Language)
+                else if (state == GameState.Account || state == GameState.Language
+                      || state == GameState.Stats || state == GameState.BeatmapEditor)
                 {
-                    state = GameState.Menu;
-                    prevKb = Keyboard.GetState();
-                    base.Update(gameTime);
-                    return;
+                    if (state == GameState.BeatmapEditor)
+                    { edPreviewInstance?.Stop(); edPreviewing = false; }
+                    state = GameState.Menu; discordRpc?.SetMenu();
                 }
-                else
-                {
-                    Exit();
-                }
+                else { Exit(); }
+
+                prevKb = kb; prevMouseState = mouseState; prevScrollValue = mouseState.ScrollWheelValue;
+                base.Update(gameTime); return;
             }
 
-            if (state == GameState.Menu)
+            switch (state)
             {
-                menuTimer += (float)gameTime.ElapsedGameTime.TotalSeconds;
+                case GameState.Menu: UpdateMenu(gameTime); break;
+                case GameState.Language: UpdateLanguage(); break;
+                case GameState.Result: UpdateResult(); break;
+                case GameState.Account: HandleAccountInput(kb, prevKb); break;
+                case GameState.Stats: break; // stats is just display
+                case GameState.BeatmapEditor: UpdateEditor(gameTime); break;
+                case GameState.Playing: UpdatePlaying(gameTime); break;
+            }
 
-                if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up))
-                    currentMenuIndex = (currentMenuIndex - 1 + menuKeys.Length) % menuKeys.Length;
-                if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down))
-                    currentMenuIndex = (currentMenuIndex + 1) % menuKeys.Length;
+            prevKb = kb;
+            prevMouseState = mouseState;
+            prevScrollValue = mouseState.ScrollWheelValue;
+            base.Update(gameTime);
+        }
 
-                // Song selection with left/right
-                if (kb.IsKeyDown(Keys.Left) && !prevKb.IsKeyDown(Keys.Left) && songs.Count > 0)
+        void UpdateMenu(GameTime gt)
+        {
+            menuTimer += (float)gt.ElapsedGameTime.TotalSeconds;
+
+            if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up))
+                currentMenuIndex = (currentMenuIndex - 1 + menuKeys.Length) % menuKeys.Length;
+            if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down))
+                currentMenuIndex = (currentMenuIndex + 1) % menuKeys.Length;
+
+            // Left/Right = difficulty
+            if (kb.IsKeyDown(Keys.Left) && !prevKb.IsKeyDown(Keys.Left) && songs.Count > 0)
+            {
+                var s = songs[currentSongIndex];
+                if (s.Difficulties.Count > 1)
                 {
-                    currentSongIndex = Math.Max(0, currentSongIndex - 1);
+                    int idx = s.Difficulties.IndexOf(currentDifficulty);
+                    idx = (idx - 1 + s.Difficulties.Count) % s.Difficulties.Count;
+                    currentDifficulty = s.Difficulties[idx];
                     LoadCurrentSong();
                 }
-                if (kb.IsKeyDown(Keys.Right) && !prevKb.IsKeyDown(Keys.Right) && songs.Count > 0)
+            }
+            if (kb.IsKeyDown(Keys.Right) && !prevKb.IsKeyDown(Keys.Right) && songs.Count > 0)
+            {
+                var s = songs[currentSongIndex];
+                if (s.Difficulties.Count > 1)
                 {
-                    currentSongIndex = Math.Min(songs.Count - 1, currentSongIndex + 1);
+                    int idx = s.Difficulties.IndexOf(currentDifficulty);
+                    idx = (idx + 1) % s.Difficulties.Count;
+                    currentDifficulty = s.Difficulties[idx];
                     LoadCurrentSong();
                 }
-
-                // Difficulty selection with Tab
-                if (kb.IsKeyDown(Keys.Tab) && !prevKb.IsKeyDown(Keys.Tab) && songs.Count > 0)
-                {
-                    var s = songs[currentSongIndex];
-                    if (s.Difficulties.Count > 1)
-                    {
-                        int idx = s.Difficulties.IndexOf(currentDifficulty);
-                        idx = (idx + 1) % s.Difficulties.Count;
-                        currentDifficulty = s.Difficulties[idx];
-                        LoadCurrentSong();
-                    }
-                }
-
-                if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
-                {
-                    var choiceKey = menuKeys[currentMenuIndex];
-                    if (choiceKey == "menu_start")
-                    {
-                        StartPlaying(false);
-                    }
-                    else if (choiceKey == "menu_editor")
-                    {
-                        StartPlaying(true);
-                    }
-                    else if (choiceKey == "menu_account")
-                    {
-                        state = GameState.Account;
-                        accountUsername = string.Empty;
-                        accountPassword = string.Empty;
-                        accountShowMessage = false;
-                        accountFieldIndex = 0;
-                    }
-                    else if (choiceKey == "menu_language")
-                    {
-                        state = GameState.Language;
-                        languageMenuIndex = System.Array.IndexOf(Localization.All, Localization.Current);
-                        if (languageMenuIndex < 0) languageMenuIndex = 0;
-                    }
-                    else if (choiceKey == "menu_exit")
-                    {
-                        Exit();
-                    }
-                }
-
-                prevKb = kb;
-                base.Update(gameTime);
-                return;
             }
 
-            // Language selection screen
-            if (state == GameState.Language)
+            // Tab = switch song
+            if (kb.IsKeyDown(Keys.Tab) && !prevKb.IsKeyDown(Keys.Tab) && songs.Count > 1)
             {
-                int langCount = Localization.All.Length;
-                if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up))
-                    languageMenuIndex = (languageMenuIndex - 1 + langCount) % langCount;
-                if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down))
-                    languageMenuIndex = (languageMenuIndex + 1) % langCount;
-                if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
-                {
-                    Localization.Current = Localization.All[languageMenuIndex];
-                    state = GameState.Menu;
-                }
-                prevKb = kb;
-                base.Update(gameTime);
-                return;
+                currentSongIndex = (currentSongIndex + 1) % songs.Count;
+                var s = songs[currentSongIndex];
+                if (!s.Difficulties.Contains(currentDifficulty))
+                    currentDifficulty = s.Difficulties.FirstOrDefault() ?? "easy";
+                LoadCurrentSong();
             }
 
+            if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
+            {
+                var key = menuKeys[currentMenuIndex];
+                if (key == "menu_start") StartPlaying(false);
+                else if (key == "menu_editor")
+                {
+                    state = GameState.BeatmapEditor;
+                    menuMusicInstance?.Stop();
+                    InitEditor();
+                    discordRpc?.SetEditor("");
+                }
+                else if (key == "menu_stats")
+                {
+                    state = GameState.Stats;
+                    string? user = accountsManager?.LoggedInUser;
+                    cachedStats = statsDb?.GetSummary(user);
+                    cachedRecent = statsDb?.GetRecentPlays(user, 8);
+                    discordRpc?.SetStats();
+                }
+                else if (key == "menu_account")
+                {
+                    state = GameState.Account;
+                    accountUsername = ""; accountPassword = "";
+                    accountShowMessage = false; accountFieldIndex = 0;
+                    accountIsLoginMode = true;
+                }
+                else if (key == "menu_language")
+                {
+                    state = GameState.Language;
+                    languageMenuIndex = Array.IndexOf(Localization.All, Localization.Current);
+                    if (languageMenuIndex < 0) languageMenuIndex = 0;
+                }
+                else if (key == "menu_exit") Exit();
+            }
+        }
+
+        void UpdateLanguage()
+        {
+            int c = Localization.All.Length;
+            if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up)) languageMenuIndex = (languageMenuIndex - 1 + c) % c;
+            if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down)) languageMenuIndex = (languageMenuIndex + 1) % c;
+            if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
+            { Localization.Current = Localization.All[languageMenuIndex]; state = GameState.Menu; }
+        }
+
+        void UpdateResult()
+        {
+            if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up)) resultMenuIndex = (resultMenuIndex - 1 + 2) % 2;
+            if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down)) resultMenuIndex = (resultMenuIndex + 1) % 2;
+            if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
+            {
+                if (resultMenuIndex == 0) StartPlaying(false);
+                else { state = GameState.Menu; ExitBorderlessFullscreen(); menuMusicInstance?.Play(); discordRpc?.SetMenu(); }
+            }
+        }
+
+        void UpdatePlaying(GameTime gameTime)
+        {
             float time = (float)stopwatch.Elapsed.TotalSeconds;
+            Keys[] keys = { Keys.D, Keys.F, Keys.J, Keys.K };
 
-            // Result screen
-            if (state == GameState.Result)
-            {
-                if (kb.IsKeyDown(Keys.Up) && !prevKb.IsKeyDown(Keys.Up)) resultMenuIndex = (resultMenuIndex - 1 + 2) % 2;
-                if (kb.IsKeyDown(Keys.Down) && !prevKb.IsKeyDown(Keys.Down)) resultMenuIndex = (resultMenuIndex + 1) % 2;
-                if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
-                {
-                    if (resultMenuIndex == 0)
-                    {
-                        StartPlaying(editorMode);
-                    }
-                    else if (resultMenuIndex == 1)
-                    {
-                        state = GameState.Menu;
-                        ExitBorderlessFullscreen();
-                    }
-                }
-                prevKb = kb;
-                base.Update(gameTime);
-                return;
-            }
-
-            // Account screen
-            if (state == GameState.Account)
-            {
-                HandleAccountInput(kb, prevKb);
-                prevKb = kb;
-                base.Update(gameTime);
-                return;
-            }
-
-            // === Playing state ===
-            Keys[] keys = new[] { Keys.D, Keys.F, Keys.J, Keys.K };
             for (int c = 0; c < 4; c++)
             {
                 if (kb.IsKeyDown(keys[c]) && !prevKb.IsKeyDown(keys[c]))
                 {
                     if (editorMode)
                     {
-                        var n = new Note { Time = time, Column = c };
-                        notes.AddLast(n);
+                        notes.AddLast(new Note { Time = time, Column = c });
                     }
                     else
                     {
                         Note? nearest = null;
                         LinkedListNode<Note>? nearestNode = null;
                         float best = float.MaxValue;
-                        const float hitWindow = 0.30f;
                         for (var node = notes.First; node != null; node = node.Next)
                         {
                             var n = node.Value;
                             if (n.Column != c) continue;
                             float dt = Math.Abs(n.Time - time);
-                            if (dt <= hitWindow && dt < best)
-                            {
-                                best = dt;
-                                nearest = n;
-                                nearestNode = node;
-                            }
+                            if (dt <= 0.30f && dt < best) { best = dt; nearest = n; nearestNode = node; }
                         }
                         if (nearestNode != null)
                         {
                             notes.Remove(nearestNode);
-                            score += 100;
-                            combo++;
-                            hitCount++;
+                            int pts; string jText; Color jColor;
+                            if (best <= GameConfig.PerfectWindow) { pts = GameConfig.PerfectScore; jText = "PERFECT"; jColor = new Color(255, 220, 50); }
+                            else if (best <= GameConfig.GreatWindow) { pts = GameConfig.GreatScore; jText = "GREAT"; jColor = new Color(80, 255, 120); }
+                            else { pts = GameConfig.GoodScore; jText = "GOOD"; jColor = new Color(0, 200, 255); }
+
+                            score += pts; combo++; hitCount++;
                             if (combo > maxCombo) maxCombo = combo;
+                            sfxHit?.Play(Math.Clamp(0.5f + combo * 0.005f, 0.5f, 0.9f), Math.Clamp(combo * 0.015f, 0f, 0.8f), 0f);
+                            shakeTimer = 0.06f; shakeIntensity = Math.Clamp(1f + combo * 0.05f, 1f, 4f);
+                            judgmentPopups.Add(new JudgmentPopup { Text = jText, Color = jColor, Timer = 0.6f,
+                                Position = new Vector2(LaneLeft + c * LaneWidth + LaneWidth / 2, HitZoneY - 30) });
+                            SpawnHitParticles(c);
                         }
                     }
-
-                    // Flash feedback using lane layout
                     int lx = LaneLeft + c * LaneWidth + 4;
-                    int ly = HitZoneY;
-                    var rect = new Rectangle(lx, ly, LaneWidth - 8, HitZoneHeight);
                     if (keyFlashPool != null)
                     {
                         var k = keyFlashPool.Rent();
-                        k.Reset(rect, NoteColors[c], GameConfig.KeyFlashDuration);
+                        k.Reset(new Rectangle(lx, HitZoneY, LaneWidth - 8, HitZoneHeight),
+                            TierNoteColors[ComboTier][c], GameConfig.KeyFlashDuration);
                         keyFlashes.Add(k);
                     }
                 }
             }
 
-            // Save beatmap in editor: S
+            // Save in editor mode
             if (editorMode && kb.IsKeyDown(Keys.S) && !prevKb.IsKeyDown(Keys.S))
             {
-                var bm = new Beatmap { Notes = new List<Note>(notes) };
                 string songId = songs.Count > 0 ? songs[currentSongIndex].Id : "song";
-                string outPath = Path.Combine("Assets", songId + "_" + currentDifficulty + ".json");
-                var opts = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
-                File.WriteAllText(outPath, System.Text.Json.JsonSerializer.Serialize(bm, opts));
+                RcFileManager.WriteBeatmap(Path.Combine("Assets", songId + "_" + currentDifficulty + ".rcm"),
+                    new Beatmap { Notes = new List<Note>(notes) });
             }
 
-            // End-of-song detection
-            if (state == GameState.Playing && !summaryShown)
+            // End detection
+            if (!summaryShown && (notes.Count == 0 || stopwatch.Elapsed.TotalSeconds >= songDurationSeconds + 0.1))
             {
-                if (notes.Count == 0 || stopwatch.Elapsed.TotalSeconds >= songDurationSeconds + 0.1)
+                summaryShown = true; state = GameState.Result; songInstance?.Stop();
+                var pct = maxScore > 0 ? (double)score / maxScore : 0.0;
+                resultGrade = pct >= 0.95 ? "SS" : pct >= 0.85 ? "S" : pct >= 0.75 ? "A"
+                            : pct >= 0.60 ? "B" : pct >= 0.40 ? "C" : "D";
+                resultMenuIndex = 0;
+                discordRpc?.SetResult(resultGrade, score);
+
+                // Record stats
+                int total = hitCount + missCount;
+                double acc = total > 0 ? (double)hitCount / total * 100 : 0;
+                string songId = songs.Count > 0 ? songs[currentSongIndex].Id : "unknown";
+                statsDb?.RecordPlay(accountsManager?.LoggedInUser ?? "guest",
+                    songId, currentDifficulty, score, maxCombo, hitCount, missCount, acc, resultGrade);
+            }
+
+            // Shake, pulse, particles, judgments, miss detection
+            if (shakeTimer > 0) shakeTimer -= (float)gameTime.ElapsedGameTime.TotalSeconds;
+            { float bi = 0.5f; float ct = (float)stopwatch.Elapsed.TotalSeconds; float bp = (ct % bi) / bi;
+              float tgt = bp < 0.1f ? (1f - bp / 0.1f) : 0f; tgt *= Math.Clamp(combo / 10f, 0.15f, 1f);
+              beatPulseAlpha = MathHelper.Lerp(beatPulseAlpha, tgt, 0.3f); }
+
+            float dt2 = (float)gameTime.ElapsedGameTime.TotalSeconds;
+            for (int i = particles.Count - 1; i >= 0; i--)
+            { var p = particles[i]; p.Pos += p.Vel * dt2; p.Vel.Y += 500f * dt2; p.Life -= dt2; if (p.Life <= 0) particles.RemoveAt(i); }
+            for (int i = judgmentPopups.Count - 1; i >= 0; i--)
+            { var j = judgmentPopups[i]; j.Timer -= dt2; j.Position = new Vector2(j.Position.X, j.Position.Y - 45f * dt2); if (j.Timer <= 0) judgmentPopups.RemoveAt(i); }
+
+            float pTime = (float)stopwatch.Elapsed.TotalSeconds;
+            for (var mN = notes.First; mN != null;)
+            {
+                var nxt = mN.Next;
+                if (pTime - mN.Value.Time > GameConfig.ApproachTime + 0.75f)
                 {
-                    summaryShown = true;
-                    state = GameState.Result;
-                    songInstance?.Stop();
-                    var pct = maxScore > 0 ? (double)score / maxScore : 0.0;
-                    if (pct >= 0.95) resultGrade = "SS";
-                    else if (pct >= 0.85) resultGrade = "S";
-                    else if (pct >= 0.75) resultGrade = "A";
-                    else if (pct >= 0.60) resultGrade = "B";
-                    else if (pct >= 0.40) resultGrade = "C";
-                    else resultGrade = "D";
-                    resultMenuIndex = 0;
+                    int col = mN.Value.Column; notes.Remove(mN); combo = 0; missCount++;
+                    sfxMiss?.Play(0.35f, 0f, 0f);
+                    if (keyFlashPool != null)
+                    { var k = keyFlashPool.Rent(); k.Reset(new Rectangle(LaneLeft + col * LaneWidth + 4, HitZoneY, LaneWidth - 8, HitZoneHeight), Color.Red, GameConfig.MissFlashDuration); keyFlashes.Add(k); }
+                }
+                mN = nxt;
+            }
+        }
+
+        // ═══════════ Beatmap Editor Update ═══════════
+
+        void InitEditor()
+        {
+            edSongName = ""; edAuthor = ""; edAudioPath = ""; edBpm = "120";
+            edNotes = new(); edScrollTime = 0; edTotalTime = 10;
+            edFieldFocus = 0; edMessage = ""; edMessageTimer = 0;
+            edDragging = null; edPreviewing = false;
+        }
+
+        void UpdateEditor(GameTime gt)
+        {
+            float dt = (float)gt.ElapsedGameTime.TotalSeconds;
+            if (edMessageTimer > 0) edMessageTimer -= dt;
+
+            // Preview playback
+            if (edPreviewing)
+            {
+                edScrollTime = (float)edPreviewWatch.Elapsed.TotalSeconds;
+                if (edScrollTime >= edTotalTime) { edPreviewing = false; edPreviewInstance?.Stop(); }
+            }
+
+            // Scroll
+            int scrollDelta = mouseState.ScrollWheelValue - prevScrollValue;
+            if (scrollDelta != 0 && !edPreviewing)
+            {
+                edScrollTime -= scrollDelta / 120f * 0.5f;
+                edScrollTime = Math.Clamp(edScrollTime, 0, Math.Max(edTotalTime - EdVisibleSeconds, 0));
+            }
+
+            // Tab / field switching
+            if (kb.IsKeyDown(Keys.Tab) && !prevKb.IsKeyDown(Keys.Tab))
+            {
+                edFieldFocus = (edFieldFocus + 1) % 5; // -1→0→1→2→3→back to timeline
+                if (edFieldFocus == 4) edFieldFocus = -1;
+            }
+
+            // Text input for focused field
+            if (edFieldFocus >= 0)
+            {
+                bool shift = kb.IsKeyDown(Keys.LeftShift) || kb.IsKeyDown(Keys.RightShift);
+                if (kb.IsKeyDown(Keys.Back) && !prevKb.IsKeyDown(Keys.Back))
+                {
+                    ref string field = ref GetEdField(edFieldFocus);
+                    if (field.Length > 0) field = field[..^1];
+                }
+                else
+                {
+                    foreach (Keys k in Enum.GetValues(typeof(Keys)))
+                    {
+                        if (k == Keys.None || k == Keys.Tab || k == Keys.Escape || k == Keys.Enter) continue;
+                        if (kb.IsKeyDown(k) && !prevKb.IsKeyDown(k))
+                        {
+                            char ch = KeyToChar(k, shift);
+                            if (ch != '\0') { ref string field = ref GetEdField(edFieldFocus); field += ch; }
+                        }
+                    }
                 }
             }
 
-            prevKb = kb;
-            base.Update(gameTime);
+            // Space = preview toggle
+            if (kb.IsKeyDown(Keys.Space) && !prevKb.IsKeyDown(Keys.Space) && edFieldFocus < 0)
+            {
+                if (edPreviewing) { edPreviewing = false; edPreviewInstance?.Stop(); }
+                else if (!string.IsNullOrEmpty(edAudioPath) && File.Exists(edAudioPath))
+                {
+                    try
+                    {
+                        edPreviewInstance?.Stop(); edPreviewEffect?.Dispose();
+                        using var fs = File.OpenRead(edAudioPath);
+                        edPreviewEffect = SoundEffect.FromStream(fs);
+                        edPreviewInstance = edPreviewEffect.CreateInstance();
+                        edPreviewInstance.Play();
+                        edPreviewWatch.Restart(); edPreviewing = true; edScrollTime = 0;
+                    }
+                    catch { }
+                }
+            }
+
+            // Ctrl+S = save
+            bool ctrl = kb.IsKeyDown(Keys.LeftControl) || kb.IsKeyDown(Keys.RightControl);
+            if (ctrl && kb.IsKeyDown(Keys.S) && !prevKb.IsKeyDown(Keys.S))
+                SaveEditorBeatmap();
+
+            // Timeline mouse interaction
+            int tlLeft = 180; int tlRight = width - 20;
+            int tlTop = 60; int tlBottom = height - 60;
+            int tlW = tlRight - tlLeft;
+            int laneW = tlW / 4;
+            int mx = mouseState.X, my = mouseState.Y;
+
+            bool inTimeline = mx >= tlLeft && mx < tlRight && my >= tlTop && my < tlBottom;
+
+            // Left click = place or start drag
+            if (mouseState.LeftButton == ButtonState.Pressed && prevMouseState.LeftButton == ButtonState.Released && inTimeline && edFieldFocus < 0)
+            {
+                int col = (mx - tlLeft) / laneW;
+                col = Math.Clamp(col, 0, 3);
+                float t = edScrollTime + (my - tlTop) / EdPixelsPerSecond;
+
+                // Check if clicking existing note (for drag)
+                Note? hit = null;
+                foreach (var n in edNotes)
+                {
+                    float ny = tlTop + (n.Time - edScrollTime) * EdPixelsPerSecond;
+                    if (Math.Abs(ny - my) < 12 && n.Column == col) { hit = n; break; }
+                }
+
+                if (hit != null) { edDragging = hit; }
+                else
+                {
+                    edNotes.Add(new Note { Time = (float)Math.Round(t, 3), Column = col });
+                    edNotes.Sort((a, b) => a.Time.CompareTo(b.Time));
+                }
+            }
+
+            // Dragging
+            if (edDragging != null && mouseState.LeftButton == ButtonState.Pressed)
+            {
+                int col = Math.Clamp((mx - tlLeft) / laneW, 0, 3);
+                float t = edScrollTime + (my - tlTop) / EdPixelsPerSecond;
+                edDragging.Column = col;
+                edDragging.Time = (float)Math.Round(Math.Max(0, t), 3);
+            }
+            if (mouseState.LeftButton == ButtonState.Released) edDragging = null;
+
+            // Right click = delete
+            if (mouseState.RightButton == ButtonState.Pressed && prevMouseState.RightButton == ButtonState.Released && inTimeline)
+            {
+                int col = Math.Clamp((mx - tlLeft) / laneW, 0, 3);
+                edNotes.RemoveAll(n =>
+                {
+                    float ny = tlTop + (n.Time - edScrollTime) * EdPixelsPerSecond;
+                    return Math.Abs(ny - my) < 12 && n.Column == col;
+                });
+            }
+
+            // Click on left panel fields
+            if (mouseState.LeftButton == ButtonState.Pressed && prevMouseState.LeftButton == ButtonState.Released)
+            {
+                if (mx < 170 && my >= 90 && my < 250)
+                {
+                    int fi = (my - 90) / 50;
+                    if (fi >= 0 && fi <= 3) edFieldFocus = fi;
+                }
+                else if (inTimeline) edFieldFocus = -1;
+            }
+        }
+
+        ref string GetEdField(int idx)
+        {
+            switch (idx)
+            {
+                case 0: return ref edSongName;
+                case 1: return ref edAuthor;
+                case 2: return ref edAudioPath;
+                default: return ref edBpm;
+            }
+        }
+
+        void SaveEditorBeatmap()
+        {
+            // Validate
+            if (string.IsNullOrWhiteSpace(edAudioPath) || !File.Exists(edAudioPath))
+            { edMessage = Localization.Get("editor_err_audio"); edMessageTimer = 3; return; }
+            if (edNotes.Count == 0)
+            { edMessage = Localization.Get("editor_err_notes"); edMessageTimer = 3; return; }
+            if (string.IsNullOrWhiteSpace(edSongName))
+            { edMessage = Localization.Get("editor_err_name"); edMessageTimer = 3; return; }
+            if (string.IsNullOrWhiteSpace(edAuthor))
+            { edMessage = Localization.Get("editor_err_author"); edMessageTimer = 3; return; }
+
+            float.TryParse(edBpm, out float bpm);
+            if (bpm <= 0) bpm = 120;
+
+            // Copy audio to Assets
+            string audioName = Path.GetFileName(edAudioPath);
+            string destAudio = Path.Combine("Assets", audioName);
+            if (!File.Exists(destAudio) && File.Exists(edAudioPath))
+                File.Copy(edAudioPath, destAudio, true);
+
+            var bm = new Beatmap
+            {
+                Name = edSongName.Trim(),
+                Author = edAuthor.Trim(),
+                AudioFile = audioName,
+                Bpm = bpm,
+                Notes = new List<Note>(edNotes),
+            };
+
+            // Save as .rcm
+            string safeId = edSongName.Trim().ToLowerInvariant().Replace(' ', '_');
+            string rcmPath = Path.Combine("Assets", safeId + "_easy.rcm");
+            RcFileManager.WriteBeatmap(rcmPath, bm);
+
+            // Add to songs.json if not exists
+            if (!songs.Any(s => s.Id == safeId))
+            {
+                songs.Add(new SongInfo { Id = safeId, Title = edSongName.Trim(), File = audioName,
+                    Difficulties = new List<string> { "easy" } });
+                var opts = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+                File.WriteAllText("Assets/songs.json", System.Text.Json.JsonSerializer.Serialize(songs, opts));
+            }
+
+            edMessage = Localization.Get("editor_saved"); edMessageTimer = 3;
         }
 
         void StartPlaying(bool editor)
         {
             editorMode = editor;
             state = GameState.Playing;
-            score = 0;
-            combo = 0;
-            maxCombo = 0;
-            hitCount = 0;
-            missCount = 0;
-            summaryShown = false;
-            keyFlashes.Clear();
+            score = 0; combo = 0; maxCombo = 0; hitCount = 0; missCount = 0;
+            summaryShown = false; keyFlashes.Clear(); particles.Clear(); judgmentPopups.Clear();
+            shakeTimer = 0; beatPulseAlpha = 0;
             LoadCurrentSong();
             EnterBorderlessFullscreen();
-            stopwatch.Restart();
-            songInstance?.Stop();
-            songInstance?.Play();
+            menuMusicInstance?.Stop();
+            stopwatch.Restart(); songInstance?.Stop(); songInstance?.Play();
+
+            string title = songs.Count > 0 ? songs[currentSongIndex].Title : "Unknown";
+            discordRpc?.SetPlaying(title, DiffShort(currentDifficulty));
         }
 
         void EnterBorderlessFullscreen()
         {
             windowedWidth = graphics!.PreferredBackBufferWidth;
             windowedHeight = graphics.PreferredBackBufferHeight;
-            var display = GraphicsAdapter.DefaultAdapter.CurrentDisplayMode;
-            graphics.PreferredBackBufferWidth = display.Width;
-            graphics.PreferredBackBufferHeight = display.Height;
-            graphics.IsFullScreen = false;
-            graphics.ApplyChanges();
-            Window.IsBorderless = true;
-            Window.Position = Point.Zero;
-            width = display.Width;
-            height = display.Height;
-            renderCache?.Dispose();
-            renderCache = new RenderCache(GraphicsDevice);
+            var d = GraphicsAdapter.DefaultAdapter.CurrentDisplayMode;
+            graphics.PreferredBackBufferWidth = d.Width;
+            graphics.PreferredBackBufferHeight = d.Height;
+            graphics.IsFullScreen = false; graphics.ApplyChanges();
+            Window.IsBorderless = true; Window.Position = Point.Zero;
+            width = d.Width; height = d.Height;
+            renderCache?.Dispose(); renderCache = new RenderCache(GraphicsDevice);
         }
 
         void ExitBorderlessFullscreen()
@@ -587,47 +915,46 @@ namespace ClickerGame
             Window.IsBorderless = false;
             graphics!.PreferredBackBufferWidth = windowedWidth;
             graphics.PreferredBackBufferHeight = windowedHeight;
-            graphics.IsFullScreen = false;
-            graphics.ApplyChanges();
-            width = windowedWidth;
-            height = windowedHeight;
-            renderCache?.Dispose();
-            renderCache = new RenderCache(GraphicsDevice);
+            graphics.IsFullScreen = false; graphics.ApplyChanges();
+            width = windowedWidth; height = windowedHeight;
+            renderCache?.Dispose(); renderCache = new RenderCache(GraphicsDevice);
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // DRAW
+        // ═══════════════════════════════════════════════════════════════
 
         protected override void Draw(GameTime gameTime)
         {
             GraphicsDevice.Clear(new Color(10, 10, 25));
 
             spriteBatch!.Begin();
-
             DrawBackground();
-
             if (state == GameState.Playing)
             {
-                DrawGameplay(gameTime);
+                if (ComboTier > 0)
+                    spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, height), TierGlowColor[ComboTier] * (0.03f + ComboTier * 0.018f));
+                if (beatPulseAlpha > 0.01f)
+                    spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, height), TierGlowColor[ComboTier] * (beatPulseAlpha * 0.08f));
             }
+            spriteBatch.End();
 
-            if (state == GameState.Menu)
+            Matrix xform = Matrix.Identity;
+            if (state == GameState.Playing && shakeTimer > 0)
+                xform = Matrix.CreateTranslation((float)(rng.NextDouble() - 0.5) * shakeIntensity * 4f,
+                    (float)(rng.NextDouble() - 0.5) * shakeIntensity * 4f, 0f);
+
+            spriteBatch.Begin(transformMatrix: state == GameState.Playing ? xform : Matrix.Identity);
+            switch (state)
             {
-                DrawMenu();
+                case GameState.Playing: DrawGameplay(gameTime); break;
+                case GameState.Menu: DrawMenu(); break;
+                case GameState.Result: DrawResult(); break;
+                case GameState.Account: DrawAccount(); break;
+                case GameState.Language: DrawLanguage(); break;
+                case GameState.Stats: DrawStats(); break;
+                case GameState.BeatmapEditor: DrawEditor(); break;
             }
-
-            if (state == GameState.Result)
-            {
-                DrawResult();
-            }
-
-            if (state == GameState.Account)
-            {
-                DrawAccount();
-            }
-
-            if (state == GameState.Language)
-            {
-                DrawLanguage();
-            }
-
             spriteBatch.End();
             base.Draw(gameTime);
         }
@@ -635,512 +962,886 @@ namespace ClickerGame
         void DrawBackground()
         {
             if (renderCache != null)
-            {
-                var bg = renderCache.GetBackground(width, height);
-                spriteBatch!.Draw(bg, new Rectangle(0, 0, width, height), Color.White);
-            }
+                spriteBatch!.Draw(renderCache.GetBackground(width, height), new Rectangle(0, 0, width, height), Color.White);
         }
+
+        // ═══════════ Gameplay ═══════════
 
         void DrawGameplay(GameTime gameTime)
         {
             float time = (float)stopwatch.Elapsed.TotalSeconds;
-            int laneLeft = LaneLeft;
-            int hitZoneY = HitZoneY;
+            int ll = LaneLeft, hz = HitZoneY;
 
-            // Lane backgrounds (alternating subtle shading)
             for (int i = 0; i < LaneCount; i++)
-            {
-                int lx = laneLeft + i * LaneWidth;
-                spriteBatch!.Draw(pixel!, new Rectangle(lx, 0, LaneWidth, height),
-                    Color.White * (i % 2 == 0 ? 0.03f : 0.05f));
-            }
-
-            // Lane dividers
+                spriteBatch!.Draw(pixel!, new Rectangle(ll + i * LaneWidth, 0, LaneWidth, height), Color.White * (i % 2 == 0 ? 0.02f : 0.04f));
             for (int i = 0; i <= LaneCount; i++)
-            {
-                int lx = laneLeft + i * LaneWidth;
-                spriteBatch!.Draw(pixel!, new Rectangle(lx, 0, 1, height), Color.White * 0.1f);
-            }
+                spriteBatch!.Draw(pixel!, new Rectangle(ll + i * LaneWidth, 0, 1, height), Color.White * 0.08f);
 
-            // Hit zone glow
-            for (int g = 1; g <= 6; g++)
-            {
-                float a = 0.05f * (7 - g);
-                spriteBatch!.Draw(pixel!,
-                    new Rectangle(laneLeft, hitZoneY - g * 2, TotalLaneWidth, 2 + g * 4),
-                    new Color(0, 200, 255) * a);
-            }
+            // Hit zone
+            Color glow = TierGlowColor[ComboTier];
+            spriteBatch!.Draw(pixel!, new Rectangle(ll, hz, TotalLaneWidth, 2), glow * 0.8f);
+            spriteBatch.Draw(pixel!, new Rectangle(ll, hz, TotalLaneWidth, HitZoneHeight), Color.White * 0.02f);
 
-            // Hit zone line
-            spriteBatch!.Draw(pixel!,
-                new Rectangle(laneLeft, hitZoneY, TotalLaneWidth, 2), Color.White * 0.7f);
-
-            // Hit zone area
-            spriteBatch.Draw(pixel!,
-                new Rectangle(laneLeft, hitZoneY, TotalLaneWidth, HitZoneHeight),
-                Color.White * 0.03f);
-
-            // Key labels below hit zone
             for (int i = 0; i < LaneCount; i++)
             {
-                int lx = laneLeft + i * LaneWidth;
                 var label = textRenderer!.GetTexture(LaneKeys[i], "Segoe UI", 18, new Color(180, 180, 200));
-                spriteBatch.Draw(label,
-                    new Vector2(lx + (LaneWidth - label.Width) / 2, hitZoneY + HitZoneHeight + 6),
-                    Color.White);
+                spriteBatch.Draw(label, new Vector2(ll + i * LaneWidth + (LaneWidth - label.Width) / 2, hz + HitZoneHeight + 6), Color.White);
             }
 
-            // Falling notes
-            for (var node = notes.Last; node != null;)
+            // Notes
+            for (var n = notes.Last; n != null; n = n.Previous)
             {
-                var prev = node.Previous;
-                var n = node.Value;
-                float dt = n.Time - time;
-
-                // Miss: note passed the hit zone
-                if (time - n.Time > GameConfig.ApproachTime + 0.75f)
-                {
-                    notes.Remove(node);
-                    combo = 0;
-                    missCount++;
-                    int mx = laneLeft + n.Column * LaneWidth + 4;
-                    if (keyFlashPool != null)
-                    {
-                        var k = keyFlashPool.Rent();
-                        k.Reset(new Rectangle(mx, hitZoneY, LaneWidth - 8, HitZoneHeight),
-                            Color.Red, GameConfig.MissFlashDuration);
-                        keyFlashes.Add(k);
-                    }
-                    node = prev;
-                    continue;
-                }
-
-                float progress = (GameConfig.ApproachTime - dt) / (GameConfig.ApproachTime + 0.01f);
-                int nx = laneLeft + n.Column * LaneWidth + 6;
-                int ny = (int)(MathHelper.Clamp(progress, 0f, 1f) * (hitZoneY - NoteHeight));
-                var noteRect = new Rectangle(nx, ny, LaneWidth - 12, NoteHeight);
-                Color noteColor = editorMode ? Color.Yellow : NoteColors[n.Column % NoteColors.Length];
-
-                // Note glow
-                spriteBatch.Draw(pixel!,
-                    new Rectangle(noteRect.X - 2, noteRect.Y - 2, noteRect.Width + 4, noteRect.Height + 4),
-                    noteColor * 0.25f);
-
-                // Note body
-                spriteBatch.Draw(pixel!, noteRect, noteColor * 0.9f);
-
-                // Note highlight strip
-                spriteBatch.Draw(pixel!,
-                    new Rectangle(noteRect.X, noteRect.Y, noteRect.Width, 3),
-                    Color.White * 0.4f);
-
-                node = prev;
+                float dt = n.Value.Time - time;
+                if (time - n.Value.Time > GameConfig.ApproachTime + 0.75f) continue;
+                float prog = (GameConfig.ApproachTime - dt) / (GameConfig.ApproachTime + 0.01f);
+                int nx = ll + n.Value.Column * LaneWidth + 6;
+                int ny = (int)(MathHelper.Clamp(prog, 0f, 1f) * (hz - NoteHeight));
+                var nr = new Rectangle(nx, ny, LaneWidth - 12, NoteHeight);
+                Color nc = editorMode ? Color.Yellow : TierNoteColors[ComboTier][n.Value.Column % 4];
+                spriteBatch.Draw(pixel!, new Rectangle(nr.X - 1, nr.Y - 1, nr.Width + 2, nr.Height + 2), nc * 0.2f);
+                spriteBatch.Draw(pixel!, nr, nc * 0.9f);
+                spriteBatch.Draw(pixel!, new Rectangle(nr.X, nr.Y, nr.Width, 2), Color.White * 0.35f);
             }
 
-            // Key flashes
+            // Flashes, particles, judgments
             for (int i = keyFlashes.Count - 1; i >= 0; i--)
             {
                 var k = keyFlashes[i];
-                float alpha = Math.Clamp(k.TimeToLive / GameConfig.KeyFlashDuration, 0f, 1f);
-                spriteBatch!.Draw(pixel!, k.Rect, k.Color * (alpha * 0.35f));
+                spriteBatch!.Draw(pixel!, k.Rect, k.Color * (Math.Clamp(k.TimeToLive / GameConfig.KeyFlashDuration, 0, 1) * 0.3f));
                 k.TimeToLive -= (float)gameTime.ElapsedGameTime.TotalSeconds;
-                if (k.TimeToLive <= 0f)
-                {
-                    keyFlashes.RemoveAt(i);
-                    keyFlashPool?.Return(k);
-                }
+                if (k.TimeToLive <= 0) { keyFlashes.RemoveAt(i); keyFlashPool?.Return(k); }
+            }
+            foreach (var p in particles)
+            {
+                float pa = p.Life / p.MaxLife; float ps = p.Size * (0.5f + pa * 0.5f);
+                spriteBatch!.Draw(pixel!, new Rectangle((int)(p.Pos.X - ps / 2), (int)(p.Pos.Y - ps / 2), (int)ps + 1, (int)ps + 1), p.Color * pa);
+            }
+            foreach (var j in judgmentPopups)
+            {
+                float ja = Math.Clamp(j.Timer / 0.3f, 0, 1);
+                var jt = textRenderer!.GetTexture(j.Text, "Segoe UI", 22, j.Color);
+                spriteBatch!.Draw(jt, new Vector2(j.Position.X - jt.Width / 2, j.Position.Y), Color.White * ja);
             }
 
-            // HUD: Song info (top-left)
-            string songTitle = songs.Count > 0 ? songs[currentSongIndex].Title : Localization.Get("unknown");
-            var titleTex = textRenderer!.GetTexture(songTitle, "Segoe UI", 18, Color.White);
-            spriteBatch.Draw(titleTex, new Vector2(16, 14), Color.White);
-            var diffTex = textRenderer!.GetTexture(currentDifficulty.ToUpper(), "Segoe UI", 13,
-                new Color(160, 160, 180));
-            spriteBatch.Draw(diffTex, new Vector2(16, 38), Color.White);
+            // HUD
+            string st = songs.Count > 0 ? songs[currentSongIndex].Title : Localization.Get("unknown");
+            var tt = textRenderer!.GetTexture(st, "Segoe UI", 18, Color.White);
+            spriteBatch.Draw(tt, new Vector2(16, 14), Color.White);
+            var dft = textRenderer!.GetTexture(DiffShort(currentDifficulty), "Segoe UI", 14, glow);
+            spriteBatch.Draw(dft, new Vector2(16, 38), Color.White);
 
-            // HUD: Score (top-right)
-            var scoreTex = textRenderer!.GetTexture($"{Localization.Get("score")}: {score}", "Segoe UI", 18, Color.White);
-            spriteBatch.Draw(scoreTex, new Vector2(width - scoreTex.Width - 16, 14), Color.White);
+            var sct = textRenderer!.GetTexture($"{Localization.Get("score")}: {score}", "Segoe UI", 18, Color.White);
+            spriteBatch.Draw(sct, new Vector2(width - sct.Width - 16, 14), Color.White);
 
-            // HUD: Combo (centered above hit zone)
             if (combo > 1)
             {
-                var comboTex = textRenderer!.GetTexture($"{combo}x", "Segoe UI", 36, Color.White);
-                spriteBatch.Draw(comboTex,
-                    new Vector2((width - comboTex.Width) / 2, hitZoneY - 56),
-                    Color.White * 0.9f);
+                int cs = Math.Min(36 + ComboTier * 4, 52);
+                var ct = textRenderer!.GetTexture($"{combo}x", "Segoe UI", cs, TierGlowColor[ComboTier]);
+                spriteBatch.Draw(ct, new Vector2((width - ct.Width) / 2, hz - 56 - ComboTier * 4), Color.White);
             }
 
-            // Progress bar at top
             if (songDurationSeconds > 0)
             {
-                float prog = Math.Clamp((float)(stopwatch.Elapsed.TotalSeconds / songDurationSeconds), 0f, 1f);
-                spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, 3), Color.White * 0.08f);
-                spriteBatch.Draw(pixel!, new Rectangle(0, 0, (int)(width * prog), 3), new Color(0, 200, 255));
+                float pr = Math.Clamp((float)(stopwatch.Elapsed.TotalSeconds / songDurationSeconds), 0, 1);
+                spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, 3), Color.White * 0.06f);
+                spriteBatch.Draw(pixel!, new Rectangle(0, 0, (int)(width * pr), 3), glow);
             }
 
-            // Editor mode indicator
             if (editorMode)
             {
-                var edTex = textRenderer!.GetTexture(Localization.Get("editor_hint"), "Segoe UI", 14, Color.Yellow);
-                spriteBatch.Draw(edTex, new Vector2((width - edTex.Width) / 2, height - 22), Color.White);
+                var et = textRenderer!.GetTexture(Localization.Get("editor_hint"), "Segoe UI", 14, Color.Yellow);
+                spriteBatch.Draw(et, new Vector2((width - et.Width) / 2, height - 22), Color.White);
             }
         }
 
+        // ═══════════ Modern Menu ═══════════
+
         void DrawMenu()
         {
-            int centerX = width / 2;
-
-            // Title glow animation
+            int cx = width / 2;
             float pulse = (float)(0.8 + 0.2 * Math.Sin(menuTimer * 2.0));
-            int circleSize = 160;
-            int titleCY = 110;
 
-            for (int glow = 1; glow <= 5; glow++)
-            {
-                float a = 0.05f * (6 - glow) * pulse;
-                int size = circleSize + glow * 22;
-                spriteBatch!.Draw(circleTexture!,
-                    new Rectangle(centerX - size / 2, titleCY - size / 2, size, size),
-                    new Color(0, 200, 255) * a);
-            }
+            // Title
+            int titleY = 80;
+            var titleTex = textRenderer!.GetTexture("CLICK", "Segoe UI", 48, Color.White);
+            spriteBatch!.Draw(titleTex, new Vector2(cx - titleTex.Width / 2, titleY), Color.White);
 
-            spriteBatch!.Draw(circleTexture!,
-                new Rectangle(centerX - circleSize / 2, titleCY - circleSize / 2, circleSize, circleSize),
-                new Color(0, 100, 180) * 0.25f);
+            // Thin accent line under title
+            int lineW = 120;
+            spriteBatch.Draw(pixel!, new Rectangle(cx - lineW / 2, titleY + titleTex.Height + 4, lineW, 2), new Color(0, 200, 255) * pulse);
 
-            var titleTex = textRenderer!.GetTexture("CLICK", "Segoe UI", 56, Color.White);
-            spriteBatch.Draw(titleTex,
-                new Vector2(centerX - titleTex.Width / 2, titleCY - titleTex.Height / 2),
-                Color.White);
-
-            // Song selection
-            int cardY = titleCY + circleSize / 2 + 16;
+            // Song selector card
+            int cardY = titleY + titleTex.Height + 24;
             if (songs.Count > 0)
             {
                 var s = songs[currentSongIndex];
-                string songLabel = $"\u25C0  {s.Title}  \u25B6";
-                var songTex = textRenderer!.GetTexture(songLabel, "Segoe UI", 18, Color.White);
-                spriteBatch.Draw(songTex,
-                    new Vector2(centerX - songTex.Width / 2, cardY), Color.White);
+                var songTex = textRenderer!.GetTexture(s.Title, "Segoe UI", 20, Color.White);
+                spriteBatch.Draw(songTex, new Vector2(cx - songTex.Width / 2, cardY), Color.White);
 
-                string diffStr = $"{Localization.Get("difficulty")}: {currentDifficulty.ToUpper()}";
-                if (s.Difficulties.Count > 1) diffStr += "  (Tab)";
-                var diffTex = textRenderer!.GetTexture(diffStr, "Segoe UI", 13, new Color(140, 140, 170));
-                spriteBatch.Draw(diffTex,
-                    new Vector2(centerX - diffTex.Width / 2, cardY + 28), Color.White);
+                // Difficulty pills
+                int pillY = cardY + 30;
+                int pillGap = 8;
+                var diffs = s.Difficulties;
+                int totalW = 0;
+                var pillWidths = new int[diffs.Count];
+                for (int i = 0; i < diffs.Count; i++)
+                {
+                    var dt = textRenderer!.GetTexture(DiffShort(diffs[i]), "Segoe UI", 13, Color.White);
+                    pillWidths[i] = dt.Width + 20;
+                    totalW += pillWidths[i] + (i > 0 ? pillGap : 0);
+                }
+                int px = cx - totalW / 2;
+                for (int i = 0; i < diffs.Count; i++)
+                {
+                    bool active = diffs[i] == currentDifficulty;
+                    var pillRect = new Rectangle(px, pillY, pillWidths[i], 26);
+                    Color pillBg = active ? new Color(0, 200, 255) * 0.2f : Color.White * 0.04f;
+                    Color pillBorder = active ? new Color(0, 200, 255) * 0.5f : Color.White * 0.08f;
+                    spriteBatch.Draw(pixel!, pillRect, pillBg);
+                    DrawRectBorder(pillRect, pillBorder);
+                    Color tc = active ? new Color(0, 200, 255) : new Color(140, 140, 160);
+                    var dt = textRenderer!.GetTexture(DiffShort(diffs[i]), "Segoe UI", 13, tc);
+                    spriteBatch.Draw(dt, new Vector2(pillRect.X + (pillRect.Width - dt.Width) / 2, pillRect.Y + 4), Color.White);
+                    px += pillWidths[i] + pillGap;
+                }
+
+                // Song navigation hint
+                var tabHint = textRenderer!.GetTexture("Tab \u25B6", "Segoe UI", 11, new Color(80, 80, 100));
+                spriteBatch.Draw(tabHint, new Vector2(cx - tabHint.Width / 2, pillY + 32), Color.White);
             }
 
-            // Menu buttons
-            int optW = 260;
-            int optH = 42;
-            int gap = 8;
-            int optX = centerX - optW / 2;
-            int optY = cardY + 64;
+            // Menu buttons - modern flat style
+            int optW = 240;
+            int optH = 38;
+            int gap = 6;
+            int optX = cx - optW / 2;
+            int optY = cardY + 98;
 
             for (int i = 0; i < menuKeys.Length; i++)
             {
                 bool sel = i == currentMenuIndex;
-                var btnRect = new Rectangle(optX, optY + i * (optH + gap), optW, optH);
+                var btn = new Rectangle(optX, optY + i * (optH + gap), optW, optH);
 
                 if (sel)
                 {
-                    spriteBatch.Draw(pixel!, btnRect, new Color(0, 200, 255) * 0.12f);
-                    spriteBatch.Draw(pixel!,
-                        new Rectangle(btnRect.X, btnRect.Y, 3, btnRect.Height),
-                        new Color(0, 200, 255));
+                    spriteBatch.Draw(pixel!, btn, new Color(0, 200, 255) * 0.1f);
+                    spriteBatch.Draw(pixel!, new Rectangle(btn.X, btn.Y, 3, btn.Height), new Color(0, 200, 255));
                 }
                 else
-                {
-                    spriteBatch.Draw(pixel!, btnRect, Color.White * 0.04f);
-                }
+                    spriteBatch.Draw(pixel!, btn, Color.White * 0.03f);
 
-                DrawRectBorder(btnRect, sel ? new Color(0, 200, 255) * 0.25f : Color.White * 0.06f);
-
-                var textCol = sel ? Color.White : new Color(180, 180, 200);
-                var tex = textRenderer!.GetTexture(Localization.Get(menuKeys[i]), "Segoe UI", 20, textCol);
-                spriteBatch.Draw(tex,
-                    new Vector2(btnRect.X + 20, btnRect.Y + (btnRect.Height - tex.Height) / 2),
-                    Color.White);
+                DrawRectBorder(btn, sel ? new Color(0, 200, 255) * 0.2f : Color.White * 0.04f);
+                var tc2 = sel ? Color.White : new Color(160, 160, 180);
+                var tex = textRenderer!.GetTexture(Localization.Get(menuKeys[i]), "Segoe UI", 17, tc2);
+                spriteBatch.Draw(tex, new Vector2(btn.X + 18, btn.Y + (btn.Height - tex.Height) / 2), Color.White);
             }
 
             // Hint bar
-            var hint = textRenderer!.GetTexture(
-                Localization.Get("hint_menu"),
-                "Segoe UI", 12, new Color(100, 100, 130));
-            spriteBatch.Draw(hint,
-                new Vector2(centerX - hint.Width / 2, height - 32), Color.White);
+            var hint = textRenderer!.GetTexture(Localization.Get("hint_menu"), "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(hint, new Vector2(cx - hint.Width / 2, height - 28), Color.White);
+
+            // Logged-in display
+            if (accountsManager?.LoggedInUser != null)
+            {
+                var ut = textRenderer!.GetTexture($"{Localization.Get("logged_in_as")}: {accountsManager.LoggedInUser}", "Segoe UI", 12, new Color(80, 255, 120));
+                spriteBatch.Draw(ut, new Vector2(width - ut.Width - 14, 12), Color.White);
+            }
         }
+
+        // ═══════════ Result ═══════════
 
         void DrawResult()
         {
             spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.7f);
+            int cx = width / 2;
+            int cardW = 320, cardH = 340;
+            int cardX = cx - cardW / 2, cardY = (height - cardH) / 2;
 
-            int centerX = width / 2;
-            int cardW = 340;
-            int cardH = 360;
-            int cardX = centerX - cardW / 2;
-            int cardY = (height - cardH) / 2;
+            var cr = new Rectangle(cardX, cardY, cardW, cardH);
+            spriteBatch.Draw(pixel!, cr, new Color(14, 14, 32) * 0.96f);
+            DrawRectBorder(cr, new Color(0, 200, 255) * 0.15f);
 
-            // Card
-            var cardRect = new Rectangle(cardX, cardY, cardW, cardH);
-            spriteBatch.Draw(pixel!, cardRect, new Color(16, 16, 36) * 0.95f);
-            DrawRectBorder(cardRect, new Color(0, 200, 255) * 0.25f);
+            var title = textRenderer!.GetTexture(Localization.Get("result"), "Segoe UI", 24, Color.White);
+            spriteBatch.Draw(title, new Vector2(cx - title.Width / 2, cardY + 14), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, cardY + 48, cardW - 40, 1), Color.White * 0.08f);
 
-            // Title
-            var title = textRenderer!.GetTexture(Localization.Get("result"), "Segoe UI", 28, Color.White);
-            spriteBatch.Draw(title,
-                new Vector2(centerX - title.Width / 2, cardY + 18), Color.White);
+            Color gc = resultGrade switch
+            { "SS" => new Color(255, 220, 50), "S" => new Color(255, 180, 0), "A" => new Color(80, 255, 120),
+              "B" => new Color(0, 200, 255), "C" => new Color(180, 140, 255), _ => new Color(255, 80, 80) };
+            var gt = textRenderer!.GetTexture(resultGrade, "Segoe UI", 48, gc);
+            spriteBatch.Draw(gt, new Vector2(cx - gt.Width / 2, cardY + 56), Color.White);
 
-            // Separator
-            spriteBatch.Draw(pixel!,
-                new Rectangle(cardX + 20, cardY + 56, cardW - 40, 1), Color.White * 0.12f);
+            int sy = cardY + 120, sx = cardX + 24, sw = cardW - 48;
+            int lh = 22;
+            DrawStatLine(Localization.Get("score"), $"{score}/{maxScore}", sy, sx, sw);
+            DrawStatLine(Localization.Get("max_combo"), $"{maxCombo}x", sy + lh, sx, sw);
+            DrawStatLine(Localization.Get("hit"), $"{hitCount}", sy + lh * 2, sx, sw);
+            DrawStatLine(Localization.Get("miss"), $"{missCount}", sy + lh * 3, sx, sw);
+            int tn = hitCount + missCount;
+            DrawStatLine(Localization.Get("accuracy"), tn > 0 ? $"{(double)hitCount / tn * 100:F1}%" : "--", sy + lh * 4, sx, sw);
 
-            // Grade
-            Color gradeColor = resultGrade switch
-            {
-                "SS" => new Color(255, 220, 50),
-                "S" => new Color(255, 180, 0),
-                "A" => new Color(80, 255, 120),
-                "B" => new Color(0, 200, 255),
-                "C" => new Color(180, 140, 255),
-                _ => new Color(255, 80, 80),
-            };
-            var gradeTex = textRenderer!.GetTexture(resultGrade, "Segoe UI", 52, gradeColor);
-            spriteBatch.Draw(gradeTex,
-                new Vector2(centerX - gradeTex.Width / 2, cardY + 68), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, sy + lh * 5 + 6, cardW - 40, 1), Color.White * 0.08f);
 
-            // Stats
-            int sy = cardY + 140;
-            int sx = cardX + 28;
-            int sw = cardW - 56;
-            int lineH = 24;
-
-            DrawStatLine(Localization.Get("score"), $"{score} / {maxScore}", sy, sx, sw);
-            DrawStatLine(Localization.Get("max_combo"), $"{maxCombo}x", sy + lineH, sx, sw);
-            DrawStatLine(Localization.Get("hit"), $"{hitCount}", sy + lineH * 2, sx, sw);
-            DrawStatLine(Localization.Get("miss"), $"{missCount}", sy + lineH * 3, sx, sw);
-            int totalNotes = hitCount + missCount;
-            string accStr = totalNotes > 0 ? $"{(double)hitCount / totalNotes * 100:F1}%" : "--";
-            DrawStatLine(Localization.Get("accuracy"), accStr, sy + lineH * 4, sx, sw);
-
-            // Separator
-            spriteBatch.Draw(pixel!,
-                new Rectangle(cardX + 20, sy + lineH * 5 + 4, cardW - 40, 1), Color.White * 0.12f);
-
-            // Buttons
             string[] opts = { Localization.Get("retry"), Localization.Get("menu") };
-            int resultOptY = sy + lineH * 5 + 16;
-            for (int i = 0; i < opts.Length; i++)
+            int oy = sy + lh * 5 + 16;
+            for (int i = 0; i < 2; i++)
             {
                 bool sel = i == resultMenuIndex;
-                int bx = centerX - 80;
-                int by = resultOptY + i * 34;
-
+                int bx = cx - 70, by = oy + i * 32;
                 if (sel)
                 {
-                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, 160, 28),
-                        new Color(0, 200, 255) * 0.12f);
-                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, 3, 28),
-                        new Color(0, 200, 255));
+                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, 140, 26), new Color(0, 200, 255) * 0.1f);
+                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, 3, 26), new Color(0, 200, 255));
                 }
-
-                var col = sel ? Color.White : new Color(160, 160, 180);
-                var t = textRenderer!.GetTexture(opts[i], "Segoe UI", 16, col);
-                spriteBatch.Draw(t, new Vector2(bx + 14, by + (28 - t.Height) / 2), Color.White);
+                var t = textRenderer!.GetTexture(opts[i], "Segoe UI", 15, sel ? Color.White : new Color(150, 150, 170));
+                spriteBatch.Draw(t, new Vector2(bx + 12, by + (26 - t.Height) / 2), Color.White);
             }
         }
+
+        // ═══════════ Account ═══════════
 
         void DrawAccount()
         {
             spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.7f);
+            int cx = width / 2;
+            int cardW = 360, cardH = 320;
+            int cardX = cx - cardW / 2, cardY = (height - cardH) / 2;
 
-            int centerX = width / 2;
-            int cardW = 380;
-            int cardH = 300;
-            int cardX = centerX - cardW / 2;
-            int cardY = (height - cardH) / 2;
+            spriteBatch.Draw(pixel!, new Rectangle(cardX, cardY, cardW, cardH), new Color(14, 14, 32) * 0.96f);
+            DrawRectBorder(new Rectangle(cardX, cardY, cardW, cardH), new Color(160, 80, 255) * 0.15f);
 
-            var cardRect = new Rectangle(cardX, cardY, cardW, cardH);
-            spriteBatch.Draw(pixel!, cardRect, new Color(16, 16, 36) * 0.95f);
-            DrawRectBorder(cardRect, new Color(160, 80, 255) * 0.25f);
+            string titleKey = accountIsLoginMode ? "account_login" : "account_register";
+            var title = textRenderer!.GetTexture(Localization.Get(titleKey), "Segoe UI", 20, Color.White);
+            spriteBatch.Draw(title, new Vector2(cx - title.Width / 2, cardY + 16), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, cardY + 46, cardW - 40, 1), Color.White * 0.08f);
 
-            var title = textRenderer!.GetTexture(Localization.Get("account_register"), "Segoe UI", 22, Color.White);
-            spriteBatch.Draw(title,
-                new Vector2(centerX - title.Width / 2, cardY + 18), Color.White);
+            int fy = cardY + 56;
+            if (accountsManager?.LoggedInUser != null)
+            {
+                var lt = textRenderer!.GetTexture($"{Localization.Get("logged_in_as")}: {accountsManager.LoggedInUser}", "Segoe UI", 12, new Color(80, 255, 120));
+                spriteBatch.Draw(lt, new Vector2(cx - lt.Width / 2, fy), Color.White);
+                fy += 24;
+            }
 
-            spriteBatch.Draw(pixel!,
-                new Rectangle(cardX + 20, cardY + 52, cardW - 40, 1), Color.White * 0.12f);
+            int fx = cardX + 24, fw = cardW - 48;
+            DrawTextField(Localization.Get("username"), accountUsername, fx, fy, fw, accountFieldIndex == 0, false);
+            DrawTextField(Localization.Get("password"), accountPassword, fx, fy + 64, fw, accountFieldIndex == 1, true);
 
-            int fx = cardX + 28;
-            int fw = cardW - 56;
+            var hint = textRenderer!.GetTexture(Localization.Get("hint_account"), "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(hint, new Vector2(cx - hint.Width / 2, cardY + cardH - 44), Color.White);
 
-            // Username
-            var uLabel = textRenderer!.GetTexture(Localization.Get("username"), "Segoe UI", 13, new Color(160, 160, 180));
-            spriteBatch.Draw(uLabel, new Vector2(fx, cardY + 66), Color.White);
-            var uBox = new Rectangle(fx, cardY + 86, fw, 34);
-            spriteBatch.Draw(pixel!, uBox, accountFieldIndex == 0 ? Color.White * 0.07f : Color.White * 0.03f);
-            DrawRectBorder(uBox, accountFieldIndex == 0 ? new Color(0, 200, 255) * 0.4f : Color.White * 0.08f);
-            var uText = textRenderer!.GetTexture(accountUsername + (accountFieldIndex == 0 ? "|" : ""),
-                "Segoe UI", 15, Color.White);
-            spriteBatch.Draw(uText, new Vector2(uBox.X + 8, uBox.Y + 7), Color.White);
-
-            // Password
-            var pLabel = textRenderer!.GetTexture(Localization.Get("password"), "Segoe UI", 13, new Color(160, 160, 180));
-            spriteBatch.Draw(pLabel, new Vector2(fx, cardY + 132), Color.White);
-            var pBox = new Rectangle(fx, cardY + 152, fw, 34);
-            spriteBatch.Draw(pixel!, pBox, accountFieldIndex == 1 ? Color.White * 0.07f : Color.White * 0.03f);
-            DrawRectBorder(pBox, accountFieldIndex == 1 ? new Color(0, 200, 255) * 0.4f : Color.White * 0.08f);
-            var masked = new string('*', accountPassword.Length);
-            var pText = textRenderer!.GetTexture(masked + (accountFieldIndex == 1 ? "|" : ""),
-                "Segoe UI", 15, Color.White);
-            spriteBatch.Draw(pText, new Vector2(pBox.X + 8, pBox.Y + 7), Color.White);
-
-            // Hint
-            var hint = textRenderer!.GetTexture(Localization.Get("hint_account"),
-                "Segoe UI", 12, new Color(100, 100, 130));
-            spriteBatch.Draw(hint,
-                new Vector2(centerX - hint.Width / 2, cardY + 202), Color.White);
-
-            // Message
             if (accountShowMessage)
             {
-                bool success = accountMessage == Localization.Get("register_success");
-                var msgColor = success ? new Color(80, 255, 120) : new Color(255, 100, 100);
-                var m = textRenderer!.GetTexture(accountMessage, "Segoe UI", 14, msgColor);
-                spriteBatch.Draw(m, new Vector2(centerX - m.Width / 2, cardY + 230), Color.White);
+                bool ok = accountMessage == Localization.Get("register_success") || accountMessage == Localization.Get("login_success");
+                var mc = ok ? new Color(80, 255, 120) : new Color(255, 100, 100);
+                var m = textRenderer!.GetTexture(accountMessage, "Segoe UI", 13, mc);
+                spriteBatch.Draw(m, new Vector2(cx - m.Width / 2, cardY + cardH - 24), Color.White);
             }
         }
+
+        void DrawTextField(string label, string value, int x, int y, int w, bool focused, bool masked)
+        {
+            var lb = textRenderer!.GetTexture(label, "Segoe UI", 12, new Color(120, 120, 150));
+            spriteBatch!.Draw(lb, new Vector2(x, y), Color.White);
+            var box = new Rectangle(x, y + 18, w, 32);
+            spriteBatch.Draw(pixel!, box, focused ? Color.White * 0.06f : Color.White * 0.025f);
+            DrawRectBorder(box, focused ? new Color(0, 200, 255) * 0.3f : Color.White * 0.06f);
+            string disp = masked ? new string('\u2022', value.Length) : value;
+            if (focused) disp += "|";
+            var vt = textRenderer!.GetTexture(disp, "Segoe UI", 14, Color.White);
+            spriteBatch.Draw(vt, new Vector2(box.X + 8, box.Y + 7), Color.White);
+        }
+
+        // ═══════════ Language ═══════════
 
         void DrawLanguage()
         {
             spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.7f);
+            int cx = width / 2, lc = Localization.All.Length;
+            int cardW = 300, cardH = 60 + lc * 38;
+            int cardX = cx - cardW / 2, cardY = (height - cardH) / 2;
 
-            int centerX = width / 2;
-            int langCount = Localization.All.Length;
-            int cardW = 340;
-            int cardH = 80 + langCount * 42;
-            int cardX = centerX - cardW / 2;
-            int cardY = (height - cardH) / 2;
+            spriteBatch.Draw(pixel!, new Rectangle(cardX, cardY, cardW, cardH), new Color(14, 14, 32) * 0.96f);
+            DrawRectBorder(new Rectangle(cardX, cardY, cardW, cardH), new Color(0, 200, 255) * 0.15f);
 
-            var cardRect = new Rectangle(cardX, cardY, cardW, cardH);
-            spriteBatch.Draw(pixel!, cardRect, new Color(16, 16, 36) * 0.95f);
-            DrawRectBorder(cardRect, new Color(0, 200, 255) * 0.25f);
+            var title = textRenderer!.GetTexture(Localization.Get("select_language"), "Segoe UI", 20, Color.White);
+            spriteBatch.Draw(title, new Vector2(cx - title.Width / 2, cardY + 14), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, cardY + 44, cardW - 40, 1), Color.White * 0.08f);
 
-            var title = textRenderer!.GetTexture(Localization.Get("select_language"), "Segoe UI", 22, Color.White);
-            spriteBatch.Draw(title,
-                new Vector2(centerX - title.Width / 2, cardY + 16), Color.White);
-
-            spriteBatch.Draw(pixel!,
-                new Rectangle(cardX + 20, cardY + 50, cardW - 40, 1), Color.White * 0.12f);
-
-            int optY = cardY + 60;
-            for (int i = 0; i < langCount; i++)
+            for (int i = 0; i < lc; i++)
             {
                 bool sel = i == languageMenuIndex;
-                bool active = Localization.All[i] == Localization.Current;
-                int bx = cardX + 20;
-                int by = optY + i * 42;
-                int bw = cardW - 40;
-                int bh = 34;
-
+                bool act = Localization.All[i] == Localization.Current;
+                int by = cardY + 52 + i * 38;
                 if (sel)
                 {
-                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, bw, bh),
-                        new Color(0, 200, 255) * 0.12f);
-                    spriteBatch.Draw(pixel!, new Rectangle(bx, by, 3, bh),
-                        new Color(0, 200, 255));
+                    spriteBatch.Draw(pixel!, new Rectangle(cardX + 16, by, cardW - 32, 30), new Color(0, 200, 255) * 0.1f);
+                    spriteBatch.Draw(pixel!, new Rectangle(cardX + 16, by, 3, 30), new Color(0, 200, 255));
                 }
-
-                var textCol = sel ? Color.White : new Color(180, 180, 200);
-                string displayName = Localization.LanguageDisplayName(Localization.All[i]);
-                if (active) displayName += "  \u2713";
-                var tex = textRenderer!.GetTexture(displayName, "Segoe UI", 16, textCol);
-                spriteBatch.Draw(tex,
-                    new Vector2(bx + 14, by + (bh - tex.Height) / 2), Color.White);
+                string dn = Localization.LanguageDisplayName(Localization.All[i]) + (act ? "  \u2713" : "");
+                var t = textRenderer!.GetTexture(dn, "Segoe UI", 15, sel ? Color.White : new Color(160, 160, 180));
+                spriteBatch.Draw(t, new Vector2(cardX + 30, by + (30 - t.Height) / 2), Color.White);
             }
 
-            var hint = textRenderer!.GetTexture(Localization.Get("hint_language"),
-                "Segoe UI", 12, new Color(100, 100, 130));
-            spriteBatch.Draw(hint,
-                new Vector2(centerX - hint.Width / 2, cardY + cardH - 24), Color.White);
+            var hint = textRenderer!.GetTexture(Localization.Get("hint_language"), "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(hint, new Vector2(cx - hint.Width / 2, cardY + cardH - 22), Color.White);
         }
+
+        // ═══════════ Stats ═══════════
+
+        void DrawStats()
+        {
+            spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * 0.7f);
+            int cx = width / 2;
+            int cardW = 460, cardH = 420;
+            int cardX = cx - cardW / 2, cardY = (height - cardH) / 2;
+
+            spriteBatch.Draw(pixel!, new Rectangle(cardX, cardY, cardW, cardH), new Color(14, 14, 32) * 0.96f);
+            DrawRectBorder(new Rectangle(cardX, cardY, cardW, cardH), new Color(0, 200, 255) * 0.15f);
+
+            var title = textRenderer!.GetTexture(Localization.Get("stats_title"), "Segoe UI", 22, Color.White);
+            spriteBatch.Draw(title, new Vector2(cx - title.Width / 2, cardY + 14), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, cardY + 46, cardW - 40, 1), Color.White * 0.08f);
+
+            if (cachedStats == null || cachedStats.TotalPlays == 0)
+            {
+                var nd = textRenderer!.GetTexture(Localization.Get("no_data"), "Segoe UI", 16, new Color(100, 100, 130));
+                spriteBatch.Draw(nd, new Vector2(cx - nd.Width / 2, cardY + 80), Color.White);
+            }
+            else
+            {
+                int sx = cardX + 24, sw = cardW - 48, lh = 22;
+                int sy = cardY + 56;
+
+                DrawStatLine(Localization.Get("total_plays"), $"{cachedStats.TotalPlays}", sy, sx, sw);
+                DrawStatLine(Localization.Get("avg_accuracy"), $"{cachedStats.AvgAccuracy:F1}%", sy + lh, sx, sw);
+                DrawStatLine(Localization.Get("best_score"), $"{cachedStats.BestScore}", sy + lh * 2, sx, sw);
+                DrawStatLine(Localization.Get("best_combo"), $"{cachedStats.BestCombo}x", sy + lh * 3, sx, sw);
+                DrawStatLine(Localization.Get("total_hit"), $"{cachedStats.TotalHit}", sy + lh * 4, sx, sw);
+                DrawStatLine(Localization.Get("total_miss"), $"{cachedStats.TotalMiss}", sy + lh * 5, sx, sw);
+
+                // Grade distribution bar
+                int gy = sy + lh * 6 + 8;
+                var gl = textRenderer!.GetTexture(Localization.Get("grade_dist"), "Segoe UI", 13, new Color(120, 120, 150));
+                spriteBatch.Draw(gl, new Vector2(sx, gy), Color.White);
+                gy += 20;
+
+                string[] grades = { "SS", "S", "A", "B", "C", "D" };
+                int[] counts = { cachedStats.CountSS, cachedStats.CountS, cachedStats.CountA, cachedStats.CountB, cachedStats.CountC, cachedStats.CountD };
+                Color[] gColors = { new(255,220,50), new(255,180,0), new(80,255,120), new(0,200,255), new(180,140,255), new(255,80,80) };
+                int maxC = counts.Max();
+                int barMax = sw - 60;
+                for (int i = 0; i < grades.Length; i++)
+                {
+                    var gn = textRenderer!.GetTexture(grades[i], "Segoe UI", 12, gColors[i]);
+                    spriteBatch.Draw(gn, new Vector2(sx, gy + i * 18), Color.White);
+                    int bw = maxC > 0 ? (int)((float)counts[i] / maxC * barMax) : 0;
+                    if (bw < 2 && counts[i] > 0) bw = 2;
+                    spriteBatch.Draw(pixel!, new Rectangle(sx + 36, gy + i * 18 + 2, bw, 12), gColors[i] * 0.5f);
+                    var cv = textRenderer!.GetTexture($"{counts[i]}", "Segoe UI", 11, new Color(160, 160, 180));
+                    spriteBatch.Draw(cv, new Vector2(sx + 40 + bw, gy + i * 18 + 1), Color.White);
+                }
+
+                // Recent plays
+                int ry = gy + grades.Length * 18 + 12;
+                spriteBatch.Draw(pixel!, new Rectangle(cardX + 20, ry - 4, cardW - 40, 1), Color.White * 0.08f);
+                var rl = textRenderer!.GetTexture(Localization.Get("recent_plays"), "Segoe UI", 13, new Color(120, 120, 150));
+                spriteBatch.Draw(rl, new Vector2(sx, ry), Color.White);
+                ry += 20;
+
+                if (cachedRecent != null)
+                {
+                    foreach (var rec in cachedRecent.Take(5))
+                    {
+                        string line = $"{rec.SongId}  {DiffShort(rec.Difficulty)}  {rec.Grade}  {rec.Score}";
+                        var rt = textRenderer!.GetTexture(line, "Segoe UI", 11, new Color(140, 140, 160));
+                        spriteBatch.Draw(rt, new Vector2(sx, ry), Color.White);
+                        ry += 16;
+                    }
+                }
+            }
+
+            var hint = textRenderer!.GetTexture(Localization.Get("hint_stats"), "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(hint, new Vector2(cx - hint.Width / 2, cardY + cardH - 22), Color.White);
+        }
+
+        // ═══════════ Beatmap Editor ═══════════
+
+        void DrawEditor()
+        {
+            int cx = width / 2;
+
+            // Title bar
+            var title = textRenderer!.GetTexture(Localization.Get("editor_title"), "Segoe UI", 20, Color.White);
+            spriteBatch!.Draw(title, new Vector2(cx - title.Width / 2, 10), Color.White);
+            spriteBatch.Draw(pixel!, new Rectangle(0, 42, width, 1), Color.White * 0.08f);
+
+            // Left panel - metadata fields
+            int px = 12, py = 56;
+            string[] labels = { "editor_name", "editor_author", "editor_audio", "editor_bpm" };
+            string[] vals = { edSongName, edAuthor, edAudioPath, edBpm };
+            for (int i = 0; i < 4; i++)
+            {
+                bool focused = edFieldFocus == i;
+                var lb = textRenderer!.GetTexture(Localization.Get(labels[i]), "Segoe UI", 11, new Color(100, 100, 130));
+                spriteBatch.Draw(lb, new Vector2(px, py + i * 50), Color.White);
+                var box = new Rectangle(px, py + i * 50 + 16, 156, 28);
+                spriteBatch.Draw(pixel!, box, focused ? Color.White * 0.06f : Color.White * 0.025f);
+                DrawRectBorder(box, focused ? new Color(0, 200, 255) * 0.3f : Color.White * 0.04f);
+                string v = vals[i] + (focused ? "|" : "");
+                if (v.Length > 20) v = ".." + v[^18..];
+                var vt = textRenderer!.GetTexture(v, "Segoe UI", 12, Color.White);
+                spriteBatch.Draw(vt, new Vector2(box.X + 6, box.Y + 6), Color.White);
+            }
+
+            // Note count
+            var nc = textRenderer!.GetTexture($"{Localization.Get("editor_notes")}: {edNotes.Count}", "Segoe UI", 13, new Color(0, 200, 255));
+            spriteBatch.Draw(nc, new Vector2(px, py + 210), Color.White);
+
+            // Save button
+            int btnY = py + 240;
+            var saveTex = textRenderer!.GetTexture(Localization.Get("editor_save"), "Segoe UI", 13, new Color(80, 255, 120));
+            spriteBatch.Draw(saveTex, new Vector2(px, btnY), Color.White);
+
+            // Preview button
+            var prevTex = textRenderer!.GetTexture(Localization.Get("editor_play"), "Segoe UI", 13,
+                edPreviewing ? new Color(255, 220, 50) : new Color(160, 160, 180));
+            spriteBatch.Draw(prevTex, new Vector2(px, btnY + 22), Color.White);
+
+            // Message
+            if (edMessageTimer > 0 && !string.IsNullOrEmpty(edMessage))
+            {
+                bool isErr = edMessage.Contains("required") || edMessage.Contains("\u9700\u8981") || edMessage.Contains("\u81f3\u5c11");
+                var mt = textRenderer!.GetTexture(edMessage, "Segoe UI", 13, isErr ? new Color(255, 100, 100) : new Color(80, 255, 120));
+                spriteBatch.Draw(mt, new Vector2(px, btnY + 48), Color.White);
+            }
+
+            // Timeline area
+            int tlLeft = 180, tlRight = width - 20;
+            int tlTop = 56, tlBottom = height - 56;
+            int tlW = tlRight - tlLeft;
+            int laneW = tlW / 4;
+
+            // Timeline background
+            spriteBatch.Draw(pixel!, new Rectangle(tlLeft, tlTop, tlW, tlBottom - tlTop), new Color(8, 8, 20) * 0.8f);
+
+            // Lane dividers
+            for (int i = 0; i <= 4; i++)
+                spriteBatch.Draw(pixel!, new Rectangle(tlLeft + i * laneW, tlTop, 1, tlBottom - tlTop), Color.White * 0.06f);
+
+            // Lane labels
+            for (int i = 0; i < 4; i++)
+            {
+                var ll = textRenderer!.GetTexture(LaneKeys[i], "Segoe UI", 14, new Color(80, 80, 110));
+                spriteBatch.Draw(ll, new Vector2(tlLeft + i * laneW + (laneW - ll.Width) / 2, tlTop - 16), Color.White);
+            }
+
+            // Beat lines
+            float bpm; float.TryParse(edBpm, out bpm); if (bpm <= 0) bpm = 120;
+            float beatSec = 60f / bpm;
+            float startBeat = (float)Math.Floor(edScrollTime / beatSec) * beatSec;
+            for (float bt = startBeat; bt < edScrollTime + EdVisibleSeconds + beatSec; bt += beatSec)
+            {
+                float yp = tlTop + (bt - edScrollTime) * EdPixelsPerSecond;
+                if (yp < tlTop || yp > tlBottom) continue;
+                bool major = Math.Abs(bt % (beatSec * 4)) < 0.001f;
+                spriteBatch.Draw(pixel!, new Rectangle(tlLeft, (int)yp, tlW, 1), Color.White * (major ? 0.12f : 0.04f));
+
+                // Time label
+                var tl2 = textRenderer!.GetTexture($"{bt:F1}s", "Segoe UI", 9, new Color(60, 60, 80));
+                spriteBatch.Draw(tl2, new Vector2(tlLeft - tl2.Width - 4, (int)yp - 5), Color.White);
+            }
+
+            // Notes
+            foreach (var n in edNotes)
+            {
+                float yp = tlTop + (n.Time - edScrollTime) * EdPixelsPerSecond;
+                if (yp < tlTop - 20 || yp > tlBottom + 20) continue;
+
+                int nx = tlLeft + n.Column * laneW + 4;
+                int nw = laneW - 8;
+                var nr = new Rectangle(nx, (int)yp - 8, nw, 16);
+                Color nc2 = n == edDragging ? Color.Yellow : NoteColors[n.Column % 4];
+                spriteBatch.Draw(pixel!, nr, nc2 * 0.8f);
+                spriteBatch.Draw(pixel!, new Rectangle(nr.X, nr.Y, nr.Width, 2), Color.White * 0.4f);
+                DrawRectBorder(nr, nc2 * 0.4f);
+            }
+
+            // Preview playhead
+            if (edPreviewing)
+            {
+                float pyp = tlTop + (edScrollTime - edScrollTime) * EdPixelsPerSecond; // always at top since scroll follows
+                // Actually the playhead is at current preview time
+                float phY = tlTop; // scroll follows playhead
+                spriteBatch.Draw(pixel!, new Rectangle(tlLeft, (int)phY, tlW, 2), new Color(255, 50, 50));
+            }
+
+            // Bottom hint
+            spriteBatch.Draw(pixel!, new Rectangle(0, height - 46, width, 1), Color.White * 0.08f);
+            var hint = textRenderer!.GetTexture(Localization.Get("editor_hint_main"), "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(hint, new Vector2(cx - hint.Width / 2, height - 36), Color.White);
+
+            var escHint = textRenderer!.GetTexture("Esc \u2190", "Segoe UI", 11, new Color(80, 80, 110));
+            spriteBatch.Draw(escHint, new Vector2(width - escHint.Width - 12, height - 36), Color.White);
+        }
+
+        // ═══════════ Helpers ═══════════
 
         void DrawStatLine(string label, string value, int y, int x, int w)
         {
-            var labelTex = textRenderer!.GetTexture(label, "Segoe UI", 14, new Color(140, 140, 170));
-            var valueTex = textRenderer!.GetTexture(value, "Segoe UI", 14, Color.White);
-            spriteBatch!.Draw(labelTex, new Vector2(x, y), Color.White);
-            spriteBatch.Draw(valueTex, new Vector2(x + w - valueTex.Width, y), Color.White);
+            var lt = textRenderer!.GetTexture(label, "Segoe UI", 13, new Color(120, 120, 150));
+            var vt = textRenderer!.GetTexture(value, "Segoe UI", 13, Color.White);
+            spriteBatch!.Draw(lt, new Vector2(x, y), Color.White);
+            spriteBatch.Draw(vt, new Vector2(x + w - vt.Width, y), Color.White);
         }
 
-        void DrawRectBorder(Rectangle rect, Color color)
+        void DrawRectBorder(Rectangle r, Color c)
         {
-            spriteBatch!.Draw(pixel!, new Rectangle(rect.Left, rect.Top, rect.Width, 1), color);
-            spriteBatch.Draw(pixel!, new Rectangle(rect.Left, rect.Bottom - 1, rect.Width, 1), color);
-            spriteBatch.Draw(pixel!, new Rectangle(rect.Left, rect.Top, 1, rect.Height), color);
-            spriteBatch.Draw(pixel!, new Rectangle(rect.Right - 1, rect.Top, 1, rect.Height), color);
+            spriteBatch!.Draw(pixel!, new Rectangle(r.Left, r.Top, r.Width, 1), c);
+            spriteBatch.Draw(pixel!, new Rectangle(r.Left, r.Bottom - 1, r.Width, 1), c);
+            spriteBatch.Draw(pixel!, new Rectangle(r.Left, r.Top, 1, r.Height), c);
+            spriteBatch.Draw(pixel!, new Rectangle(r.Right - 1, r.Top, 1, r.Height), c);
         }
+
+        void SpawnHitParticles(int col)
+        {
+            Color[] c = TierNoteColors[ComboTier];
+            Color bc = c[col % 4];
+            int cnt = 8 + ComboTier * 5;
+            int pcx = LaneLeft + col * LaneWidth + LaneWidth / 2;
+            for (int i = 0; i < cnt; i++)
+            {
+                float a = (float)(rng.NextDouble() * Math.PI * 2);
+                float spd = 120f + (float)rng.NextDouble() * 220f + ComboTier * 35f;
+                particles.Add(new HitParticle
+                {
+                    Pos = new Vector2(pcx + (float)(rng.NextDouble() - 0.5) * 18, HitZoneY),
+                    Vel = new Vector2((float)Math.Cos(a) * spd, (float)Math.Sin(a) * spd - 120f),
+                    Color = Color.Lerp(bc, Color.White, (float)rng.NextDouble() * 0.4f),
+                    Life = 0.3f + (float)rng.NextDouble() * 0.35f, MaxLife = 0.65f,
+                    Size = 2f + (float)rng.NextDouble() * 4f,
+                });
+            }
+        }
+
+        // ═══════════ SFX Generation ═══════════
+
+        SoundEffect GenerateHitSfx()
+        {
+            int sr = 44100; int len = (int)(0.08f * sr);
+            byte[] pcm = new byte[len * 2];
+            for (int i = 0; i < len; i++)
+            { float t = (float)i / sr; float v = ((float)Math.Sin(2 * Math.PI * 800 * t) * (float)Math.Exp(-t * 60) * 0.5f + (float)Math.Sin(2 * Math.PI * 250 * t) * (float)Math.Exp(-t * 30) * 0.5f) * 0.7f;
+              short s = (short)(Math.Clamp(v, -1f, 1f) * short.MaxValue); pcm[i * 2] = (byte)(s & 0xFF); pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF); }
+            return new SoundEffect(pcm, sr, AudioChannels.Mono);
+        }
+
+        SoundEffect GenerateMissSfx()
+        {
+            int sr = 44100; int len = (int)(0.1f * sr);
+            byte[] pcm = new byte[len * 2]; Random mr = new(99);
+            for (int i = 0; i < len; i++)
+            { float t = (float)i / sr; float v = ((float)Math.Sin(2 * Math.PI * 80 * t) * (float)Math.Exp(-t * 20) * 0.4f + ((float)mr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 30) * 0.2f) * 0.4f;
+              short s = (short)(Math.Clamp(v, -1f, 1f) * short.MaxValue); pcm[i * 2] = (byte)(s & 0xFF); pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF); }
+            return new SoundEffect(pcm, sr, AudioChannels.Mono);
+        }
+
+        // ═══════════ Music Generation ═══════════
+
+        void GenerateMusicalWav(string path, float dur, float bpm = 120f, double bassNote = 110.0)
+        {
+            int sr = 44100; int n = (int)(sr * dur);
+            float[] mix = new float[n]; float bs = 60f / bpm;
+            Random wr = new((int)(bpm * 100 + dur * 10));
+
+            // Kick on every beat
+            for (float bt = 0; bt < dur; bt += bs)
+            { int st = (int)(bt * sr); int ln = Math.Min((int)(0.18f * sr), n - st); float ph = 0;
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; float fr = 150f * (float)Math.Exp(-t * 35) + 42f; ph += fr / sr;
+                mix[st + i] += (float)Math.Sin(2 * Math.PI * ph) * (float)Math.Exp(-t * 7) * 0.45f; } }
+
+            // Snare on beats 2,4
+            for (float bt = bs; bt < dur; bt += bs * 2)
+            { int st = (int)(bt * sr); int ln = Math.Min((int)(0.12f * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; float bd = (float)Math.Sin(2 * Math.PI * 200 * t) * (float)Math.Exp(-t * 22);
+                float ns = ((float)wr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 16);
+                mix[st + i] += bd * 0.3f + ns * 0.25f; } }
+
+            // Hi-hat on 8ths
+            for (float ht = 0; ht < dur; ht += bs / 2)
+            { int st = (int)(ht * sr); int ln = Math.Min((int)(0.035f * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; mix[st + i] += ((float)wr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 90) * 0.13f; } }
+
+            // Bass synth
+            double[] bassNotes = { bassNote, bassNote * 1.333, bassNote * 1.5, bassNote * 1.25 };
+            float md = bs * 4;
+            for (float ms = 0; ms < dur; ms += md)
+            { int ni = ((int)(ms / md)) % bassNotes.Length; double fr = bassNotes[ni];
+              int st = (int)(ms * sr); int ln = Math.Min((int)(md * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; float ev = Math.Min(t * 20, 1f) * Math.Max(1f - t / md, 0f);
+                float ph = (float)((fr * t) % 1.0); mix[st + i] += (ph * 2 - 1) * ev * 0.14f; } }
+
+            NormalizeAndWriteWav(path, mix, n, sr);
+        }
+
+        void GenerateMenuMusicWav(string path, float dur, float bpm, double bassNote)
+        {
+            int sr = 44100; int n = (int)(sr * dur);
+            float[] mix = new float[n]; float bs = 60f / bpm;
+            Random wr = new(42);
+
+            for (float bt = 0; bt < dur; bt += bs)
+            { int st = (int)(bt * sr); int ln = Math.Min((int)(0.15f * sr), n - st); float ph = 0;
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; ph += (100f * (float)Math.Exp(-t * 25) + 35f) / sr;
+                mix[st + i] += (float)Math.Sin(2 * Math.PI * ph) * (float)Math.Exp(-t * 9) * 0.25f; } }
+
+            for (float ht = bs / 2; ht < dur; ht += bs)
+            { int st = (int)(ht * sr); int ln = Math.Min((int)(0.025f * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; mix[st + i] += ((float)wr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 120) * 0.06f; } }
+
+            double[] cn = { bassNote * 2, bassNote * 2.5, bassNote * 3, bassNote * 2.67 }; float cd = bs * 8;
+            for (float cs = 0; cs < dur; cs += cd)
+            { int ni = ((int)(cs / cd)) % cn.Length; double[] tr = { cn[ni], cn[ni] * 1.25, cn[ni] * 1.5 };
+              int st = (int)(cs * sr); int ln = Math.Min((int)(cd * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; float ev = Math.Min(t * 4, 1f) * Math.Max(1f - t / cd * 0.3f, 0.5f);
+                float v = 0; foreach (var f in tr) v += (float)Math.Sin(2 * Math.PI * f * t);
+                mix[st + i] += v / 3f * ev * 0.1f; } }
+
+            double[] bn = { bassNote, bassNote * 1.333, bassNote * 1.5, bassNote * 1.25 }; float md = bs * 4;
+            for (float ms = 0; ms < dur; ms += md)
+            { int ni = ((int)(ms / md)) % bn.Length; double fr = bn[ni];
+              int st = (int)(ms * sr); int ln = Math.Min((int)(md * sr), n - st);
+              for (int i = 0; i < ln && st + i < n; i++)
+              { float t = (float)i / sr; mix[st + i] += (float)Math.Sin(2 * Math.PI * fr * t) * Math.Min(t * 10, 1f) * Math.Max(1f - t / md, 0f) * 0.12f; } }
+
+            NormalizeAndWriteWav(path, mix, n, sr);
+        }
+
+        // Blue Archive style: bright piano+bell tone, upbeat pop drums, synth arpeggio, chord pads
+        void GenerateBaStyleWav(string path, float dur, float bpm, double rootNote, int variation)
+        {
+            int sr = 44100; int n = (int)(sr * dur);
+            float[] mix = new float[n]; float bs = 60f / bpm;
+            Random wr = new(variation * 1000 + (int)(bpm * 10));
+
+            // Major scale intervals: root, 2nd, 3rd, 5th, 6th, octave
+            double[] scale = { 1.0, 9.0/8, 5.0/4, 3.0/2, 5.0/3, 2.0 };
+
+            // Piano-bell lead melody (bright sine+harmonics with fast decay)
+            double[] melody;
+            switch (variation)
+            {
+                case 0: melody = new double[] { 1,5.0/4,3.0/2,2, 5.0/3,3.0/2,5.0/4,1, 9.0/8,5.0/4,3.0/2,5.0/3, 2,5.0/3,3.0/2,5.0/4 }; break;
+                case 1: melody = new double[] { 2,5.0/3,3.0/2,5.0/4, 1,9.0/8,5.0/4,3.0/2, 5.0/3,2,5.0/3,3.0/2, 5.0/4,9.0/8,1,9.0/8 }; break;
+                default: melody = new double[] { 3.0/2,2,5.0/3,3.0/2, 5.0/4,3.0/2,2,5.0/3, 1,5.0/4,3.0/2,5.0/4, 9.0/8,1,5.0/3,2 }; break;
+            }
+
+            // Lead melody - piano-like bell tones
+            float noteLen = bs;
+            for (int mi = 0; mi < (int)(dur / noteLen); mi++)
+            {
+                int idx = mi % melody.Length;
+                double freq = rootNote * melody[idx];
+                int st = (int)(mi * noteLen * sr);
+                int ln = Math.Min((int)(noteLen * 0.9f * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                {
+                    float t = (float)i / sr;
+                    float env = (float)Math.Exp(-t * 4.5) * Math.Min(t * 200, 1f);
+                    // Fundamental + octave + 3rd harmonic for bell-like timbre
+                    float v = (float)Math.Sin(2 * Math.PI * freq * t) * 0.5f
+                            + (float)Math.Sin(2 * Math.PI * freq * 2 * t) * 0.25f
+                            + (float)Math.Sin(2 * Math.PI * freq * 3 * t) * 0.08f;
+                    mix[st + i] += v * env * 0.22f;
+                }
+            }
+
+            // Synth arpeggio (fast 16th note arpeggios on chord tones)
+            double[][] chords = {
+                new[] { 1.0, 5.0/4, 3.0/2 },
+                new[] { 5.0/3/2, 1.0, 5.0/4 },
+                new[] { 9.0/8, 3.0/2/1.2, 3.0/2 },
+                new[] { 3.0/2, 15.0/8/1.0, 2.0 },
+            };
+            float arpLen = bs / 4;
+            for (float at = 0; at < dur; at += arpLen)
+            {
+                int ci = ((int)(at / (bs * 4))) % chords.Length;
+                int ai = ((int)(at / arpLen)) % chords[ci].Length;
+                double freq = rootNote * 2 * chords[ci][ai];
+                int st = (int)(at * sr);
+                int ln = Math.Min((int)(arpLen * 0.7f * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                {
+                    float t = (float)i / sr;
+                    float env = (float)Math.Exp(-t * 12) * Math.Min(t * 400, 1f);
+                    mix[st + i] += (float)Math.Sin(2 * Math.PI * freq * t) * env * 0.08f;
+                }
+            }
+
+            // Upbeat kick (4-on-the-floor, punchy)
+            for (float bt = 0; bt < dur; bt += bs)
+            {
+                int st = (int)(bt * sr); int ln = Math.Min((int)(0.12f * sr), n - st); float ph = 0;
+                for (int i = 0; i < ln && st + i < n; i++)
+                { float t = (float)i / sr; float fr = 180f * (float)Math.Exp(-t * 40) + 50f; ph += fr / sr;
+                  mix[st + i] += (float)Math.Sin(2 * Math.PI * ph) * (float)Math.Exp(-t * 8) * 0.38f; }
+            }
+
+            // Snappy snare on 2 and 4
+            for (float bt = bs; bt < dur; bt += bs * 2)
+            {
+                int st = (int)(bt * sr); int ln = Math.Min((int)(0.08f * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                { float t = (float)i / sr;
+                  float body = (float)Math.Sin(2 * Math.PI * 240 * t) * (float)Math.Exp(-t * 28);
+                  float noise = ((float)wr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 22);
+                  mix[st + i] += (body * 0.2f + noise * 0.22f); }
+            }
+
+            // Bright hi-hat on 8ths with accented offbeats
+            for (float ht = 0; ht < dur; ht += bs / 2)
+            {
+                bool offbeat = ((int)(ht / (bs / 2))) % 2 == 1;
+                float vol = offbeat ? 0.14f : 0.08f;
+                int st = (int)(ht * sr); int ln = Math.Min((int)(0.02f * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                { float t = (float)i / sr;
+                  mix[st + i] += ((float)wr.NextDouble() * 2 - 1) * (float)Math.Exp(-t * 100) * vol; }
+            }
+
+            // Warm bass synth (sub + saw)
+            double[] bassPattern = { 1.0, 1.0, 5.0/3/2, 3.0/2/2 };
+            float bassLen = bs * 2;
+            for (float bt = 0; bt < dur; bt += bassLen)
+            {
+                int bi = ((int)(bt / bassLen)) % bassPattern.Length;
+                double freq = rootNote / 2 * bassPattern[bi];
+                int st = (int)(bt * sr); int ln = Math.Min((int)(bassLen * 0.9f * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                { float t = (float)i / sr;
+                  float env = Math.Min(t * 30, 1f) * Math.Max(1f - t / (bassLen * 0.9f), 0f);
+                  float sub = (float)Math.Sin(2 * Math.PI * freq * t);
+                  float saw = (float)((freq * t) % 1.0) * 2 - 1;
+                  mix[st + i] += (sub * 0.7f + saw * 0.3f) * env * 0.14f; }
+            }
+
+            // Chord pad (warm synth pad on chord changes)
+            float chordLen = bs * 4;
+            for (float ct = 0; ct < dur; ct += chordLen)
+            {
+                int ci2 = ((int)(ct / chordLen)) % chords.Length;
+                int st = (int)(ct * sr); int ln = Math.Min((int)(chordLen * sr), n - st);
+                for (int i = 0; i < ln && st + i < n; i++)
+                { float t = (float)i / sr;
+                  float env = Math.Min(t * 3, 1f) * Math.Max(1f - t / chordLen * 0.4f, 0.3f);
+                  float v = 0;
+                  foreach (var c in chords[ci2])
+                      v += (float)Math.Sin(2 * Math.PI * rootNote * c * t);
+                  mix[st + i] += v / 3f * env * 0.06f; }
+            }
+
+            NormalizeAndWriteWav(path, mix, n, sr);
+        }
+
+        void NormalizeAndWriteWav(string path, float[] mix, int n, int sr)
+        {
+            float mx = 0; for (int i = 0; i < n; i++) mx = Math.Max(mx, Math.Abs(mix[i]));
+            if (mx > 0.85f) { float sc = 0.8f / mx; for (int i = 0; i < n; i++) mix[i] *= sc; }
+
+            using var fs = new FileStream(path, FileMode.Create);
+            using var bw = new BinaryWriter(fs);
+            int br = sr * 2; int sc2 = n * 2;
+            bw.Write(System.Text.Encoding.ASCII.GetBytes("RIFF")); bw.Write(36 + sc2);
+            bw.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+            bw.Write(System.Text.Encoding.ASCII.GetBytes("fmt ")); bw.Write(16);
+            bw.Write((short)1); bw.Write((short)1); bw.Write(sr); bw.Write(br);
+            bw.Write((short)2); bw.Write((short)16);
+            bw.Write(System.Text.Encoding.ASCII.GetBytes("data")); bw.Write(sc2);
+            for (int i = 0; i < n; i++)
+            { short s = (short)(Math.Clamp(mix[i], -1f, 1f) * short.MaxValue); bw.Write(s); }
+        }
+
+        // ═══════════ Beatmap Generation ═══════════
+
+        Beatmap GenerateBeatmapObject(float duration, float bpm, string diff)
+        {
+            float bs = 60f / bpm;
+            float interval; double dc, tc;
+            switch (diff)
+            {
+                case "very_difficulty": interval = bs / 4; dc = 0.45; tc = 0.15; break;
+                case "difficulty": interval = bs / 3; dc = 0.30; tc = 0.05; break;
+                case "hard": interval = bs / 2; dc = 0.25; tc = 0.0; break;
+                default: interval = bs; dc = 0.0; tc = 0.0; break;
+            }
+            var nl = new List<Note>();
+            var r = new Random((int)(bpm * 100 + duration * 7 + diff.GetHashCode()));
+            for (float t = bs; t < duration - 0.5f; t += interval)
+            {
+                int col = r.Next(4);
+                nl.Add(new Note { Time = (float)Math.Round(t, 3), Column = col });
+                if (r.NextDouble() < dc) nl.Add(new Note { Time = (float)Math.Round(t, 3), Column = (col + 1 + r.Next(3)) % 4 });
+                if (r.NextDouble() < tc) nl.Add(new Note { Time = (float)Math.Round(t, 3), Column = (col + 2) % 4 });
+            }
+            return new Beatmap { Notes = nl };
+        }
+
+        // ═══════════ Account Input ═══════════
 
         void HandleAccountInput(KeyboardState kbState, KeyboardState prevKbState)
         {
             bool shift = kbState.IsKeyDown(Keys.LeftShift) || kbState.IsKeyDown(Keys.RightShift);
-
+            if (kbState.IsKeyDown(Keys.F1) && !prevKbState.IsKeyDown(Keys.F1))
+            { accountIsLoginMode = !accountIsLoginMode; accountShowMessage = false; return; }
             if (kbState.IsKeyDown(Keys.Tab) && !prevKbState.IsKeyDown(Keys.Tab))
-            {
-                accountFieldIndex = (accountFieldIndex + 1) % 2;
-                return;
-            }
-
+            { accountFieldIndex = (accountFieldIndex + 1) % 2; return; }
             if (kbState.IsKeyDown(Keys.Back) && !prevKbState.IsKeyDown(Keys.Back))
             {
                 if (accountFieldIndex == 0 && accountUsername.Length > 0) accountUsername = accountUsername[..^1];
                 else if (accountFieldIndex == 1 && accountPassword.Length > 0) accountPassword = accountPassword[..^1];
                 return;
             }
-
             if (kbState.IsKeyDown(Keys.Enter) && !prevKbState.IsKeyDown(Keys.Enter))
             {
                 if (accountsManager != null)
                 {
-                    if (accountsManager.Register(accountUsername, accountPassword, out var msg))
+                    if (accountIsLoginMode)
                     {
-                        accountShowMessage = true;
-                        accountMessage = Localization.Get("register_success");
-                        accountPassword = string.Empty;
+                        if (accountsManager.Login(accountUsername, accountPassword, out _))
+                        { accountShowMessage = true; accountMessage = Localization.Get("login_success"); accountPassword = ""; }
+                        else { accountShowMessage = true; accountMessage = "Invalid credentials"; }
                     }
                     else
                     {
-                        accountShowMessage = true;
-                        accountMessage = msg;
+                        if (accountsManager.Register(accountUsername, accountPassword, out _))
+                        { accountShowMessage = true; accountMessage = Localization.Get("register_success"); accountPassword = ""; }
+                        else { accountShowMessage = true; accountMessage = "Username taken or invalid"; }
                     }
                 }
                 return;
             }
-
             foreach (Keys k in Enum.GetValues(typeof(Keys)))
             {
                 if (k == Keys.None) continue;
                 if (kbState.IsKeyDown(k) && !prevKbState.IsKeyDown(k))
                 {
                     char ch = KeyToChar(k, shift);
-                    if (ch != '\0')
-                    {
-                        if (accountFieldIndex == 0) accountUsername += ch;
-                        else accountPassword += ch;
-                    }
+                    if (ch != '\0') { if (accountFieldIndex == 0) accountUsername += ch; else accountPassword += ch; }
                 }
             }
         }
 
         static char KeyToChar(Keys k, bool shift)
         {
-            if (k >= Keys.A && k <= Keys.Z)
-            {
-                char c = (char)('a' + (k - Keys.A));
-                return shift ? char.ToUpper(c) : c;
-            }
+            if (k >= Keys.A && k <= Keys.Z) { char c = (char)('a' + (k - Keys.A)); return shift ? char.ToUpper(c) : c; }
             if (k >= Keys.D0 && k <= Keys.D9) return (char)('0' + (k - Keys.D0));
             if (k >= Keys.NumPad0 && k <= Keys.NumPad9) return (char)('0' + (k - Keys.NumPad0));
             if (k == Keys.OemMinus) return '-';

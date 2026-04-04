@@ -1,5 +1,0 @@
-[
-  { "Id": "song1", "Title": "Example A", "File": "song1.wav", "Difficulties": ["easy","hard"] },
-  { "Id": "song2", "Title": "Example B", "File": "song2.wav", "Difficulties": ["easy"] },
-  { "Id": "song3", "Title": "Example C", "File": "song3.wav", "Difficulties": ["easy"] }
-]

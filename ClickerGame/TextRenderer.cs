@@ -32,13 +32,16 @@ namespace ClickerGame
             using (var g = Graphics.FromImage(bmp))
             {
                 var f = new Font(fontName, size, System.Drawing.FontStyle.Bold, GraphicsUnit.Pixel);
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 var sz = g.MeasureString(text, f);
-                int w = Math.Max(1, (int)Math.Ceiling(sz.Width));
-                int h = Math.Max(1, (int)Math.Ceiling(sz.Height));
+                int w = Math.Max(1, (int)Math.Ceiling(sz.Width) + 2);
+                int h = Math.Max(1, (int)Math.Ceiling(sz.Height) + 2);
                 using var real = new Bitmap(w, h);
                 using var gr = Graphics.FromImage(real);
                 gr.Clear(System.Drawing.Color.Transparent);
-                gr.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                gr.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                gr.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+                gr.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 using var brush = new SolidBrush(sysColor);
                 gr.DrawString(text, f, brush, 0f, 0f);
                 using var ms = new MemoryStream();

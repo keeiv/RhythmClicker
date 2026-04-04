@@ -1,60 +1,60 @@
 {
-  "Notes": [
+  "notes": [
     {
-      "Time": 5.165478,
-      "Column": 3
+      "time": 0.5,
+      "column": 0
     },
     {
-      "Time": 5.2821155,
-      "Column": 0
+      "time": 1,
+      "column": 1
     },
     {
-      "Time": 5.4821186,
-      "Column": 1
+      "time": 1.5,
+      "column": 3
     },
     {
-      "Time": 5.4821186,
-      "Column": 2
+      "time": 2,
+      "column": 3
     },
     {
-      "Time": 6.3821206,
-      "Column": 3
+      "time": 2.5,
+      "column": 1
     },
     {
-      "Time": 6.398787,
-      "Column": 0
+      "time": 3,
+      "column": 1
     },
     {
-      "Time": 6.5321193,
-      "Column": 1
+      "time": 3.5,
+      "column": 2
     },
     {
-      "Time": 6.582118,
-      "Column": 2
+      "time": 4,
+      "column": 2
     },
     {
-      "Time": 6.765453,
-      "Column": 3
+      "time": 4.5,
+      "column": 2
     },
     {
-      "Time": 6.7987905,
-      "Column": 0
+      "time": 5,
+      "column": 3
     },
     {
-      "Time": 6.9321218,
-      "Column": 2
+      "time": 5.5,
+      "column": 1
     },
     {
-      "Time": 6.982121,
-      "Column": 1
+      "time": 6,
+      "column": 3
     },
     {
-      "Time": 7.032123,
-      "Column": 3
+      "time": 6.5,
+      "column": 2
     },
     {
-      "Time": 7.2154555,
-      "Column": 0
+      "time": 7,
+      "column": 2
     }
   ]
 }

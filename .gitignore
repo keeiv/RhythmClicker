@@ -31,5 +31,14 @@ ClickerGame/Assets/*.wav
 # Accounts data (contains user credentials)
 Accounts/
 
+# Stats database
+stats.db
+
+# Generated audio markers
+Assets/.audio_v*
+
+# Published builds
+publish/
+
 # tmp_repo (development scratch)
 tmp_repo/

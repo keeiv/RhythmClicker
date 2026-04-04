@@ -6,6 +6,10 @@ namespace ClickerGame
 {
     public class Beatmap
     {
+        public string Name { get; set; } = "";
+        public string Author { get; set; } = "";
+        public string AudioFile { get; set; } = "";
+        public float Bpm { get; set; }
         public List<Note> Notes { get; set; } = new();
 
         public static Beatmap LoadFromString(string s)
