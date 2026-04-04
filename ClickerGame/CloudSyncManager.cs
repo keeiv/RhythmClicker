@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -448,5 +449,33 @@ namespace ClickerGame
         public int BestCombo { get; set; }
         public double AvgAccuracy { get; set; }
         public List<BadgeDto> Badges { get; set; } = new();
+    }
+
+    // ── Local Profile Data (saved to profile.rc) ────────────────────
+    public class LocalProfileData
+    {
+        public string AvatarId { get; set; } = "default";
+        public string BannerId { get; set; } = "default";
+        public string Bio { get; set; } = "";
+        public string Region { get; set; } = "";
+        public string CustomAvatarPath { get; set; } = "";
+
+        static readonly string ProfilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "profile.rc");
+
+        public static LocalProfileData Load()
+        {
+            try
+            {
+                if (File.Exists(ProfilePath))
+                    return RcFileManager.ReadEncrypted<LocalProfileData>(ProfilePath);
+            }
+            catch { }
+            return new LocalProfileData();
+        }
+
+        public void Save()
+        {
+            try { RcFileManager.WriteEncrypted(ProfilePath, this); } catch { }
+        }
     }
 }

@@ -114,6 +114,11 @@ namespace ClickerGame
         string editProfileMessage = "";
         float editProfileMsgTimer = 0f;
 
+        // Custom avatar
+        Texture2D? customAvatarTexture;
+        string customAvatarPath = "";
+        static readonly string AvatarsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Avatars");
+
         // Avatar/Banner presets
         static readonly (string id, string label, Color bg, Color fg, string icon)[] AvatarPresets = new[]
         {
@@ -127,6 +132,7 @@ namespace ClickerGame
             ("cyan",     "Ice",       new Color(10, 60, 80),    new Color(80, 240, 255),  "#"),
             ("orange",   "Sunset",    new Color(100, 50, 10),   new Color(255, 180, 60),  "~"),
             ("white",    "Ghost",     new Color(60, 60, 60),    new Color(220, 220, 230), "?"),
+            ("custom",   "Custom",    new Color(40, 40, 40),    new Color(200, 200, 200), "+"),
         };
         static readonly (string id, string label, Color color)[] BannerPresets = new[]
         {
@@ -456,6 +462,9 @@ namespace ClickerGame
             replayManager = new ReplayManager();
             cloudSync = new CloudSyncManager();
 
+            // Load local profile data
+            LoadLocalProfile();
+
             // Discord RPC
             try { discordRpc = new DiscordRpcManager(); }
             catch { discordRpc = null; }
@@ -780,6 +789,12 @@ namespace ClickerGame
                     {
                         // Build local fallback profile immediately
                         viewingProfile = new PlayerProfileDto { User = user };
+                        // Apply local saved profile data
+                        var lp = LocalProfileData.Load();
+                        viewingProfile.AvatarId = lp.AvatarId;
+                        viewingProfile.BannerId = lp.BannerId;
+                        viewingProfile.Bio = lp.Bio;
+                        viewingProfile.Region = lp.Region;
                         if (statsDb != null)
                         {
                             var summary = statsDb.GetSummary(user);
@@ -2721,6 +2736,96 @@ namespace ClickerGame
             return '\0';
         }
 
+        void LoadLocalProfile()
+        {
+            var lp = LocalProfileData.Load();
+            customAvatarPath = lp.CustomAvatarPath ?? "";
+            // Pre-load custom avatar texture if exists
+            LoadCustomAvatarTexture();
+            // Apply to edit defaults
+            editAvatarIndex = Math.Max(0, Array.FindIndex(AvatarPresets, a => a.id == lp.AvatarId));
+            editBannerIndex = Math.Max(0, Array.FindIndex(BannerPresets, b => b.id == lp.BannerId));
+            editBio = lp.Bio ?? "";
+            editRegion = lp.Region ?? "";
+        }
+
+        void SaveLocalProfile(string avatarId, string bannerId, string bio, string region)
+        {
+            var lp = new LocalProfileData
+            {
+                AvatarId = avatarId,
+                BannerId = bannerId,
+                Bio = bio,
+                Region = region,
+                CustomAvatarPath = customAvatarPath
+            };
+            lp.Save();
+        }
+
+        void LoadCustomAvatarTexture()
+        {
+            customAvatarTexture?.Dispose();
+            customAvatarTexture = null;
+            if (!string.IsNullOrEmpty(customAvatarPath) && File.Exists(customAvatarPath))
+            {
+                try
+                {
+                    using var fs = File.OpenRead(customAvatarPath);
+                    customAvatarTexture = Texture2D.FromStream(GraphicsDevice, fs);
+                }
+                catch { customAvatarTexture = null; }
+            }
+        }
+
+        void OpenAvatarFilePicker()
+        {
+            // Run file dialog on STA thread (required for Windows Forms dialog)
+            var thread = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    Directory.CreateDirectory(AvatarsDir);
+                    using var ofd = new System.Windows.Forms.OpenFileDialog();
+                    ofd.Title = "Select Avatar Image";
+                    ofd.Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp";
+                    ofd.InitialDirectory = AvatarsDir;
+                    if (ofd.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                    {
+                        // Copy to Avatars folder if not already there
+                        string destPath = Path.Combine(AvatarsDir, Path.GetFileName(ofd.FileName));
+                        if (!string.Equals(Path.GetFullPath(ofd.FileName), Path.GetFullPath(destPath), StringComparison.OrdinalIgnoreCase))
+                            File.Copy(ofd.FileName, destPath, true);
+                        customAvatarPath = destPath;
+                        // Reload texture on next frame
+                        _pendingAvatarReload = true;
+                    }
+                }
+                catch { }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+        }
+        bool _pendingAvatarReload = false;
+
+        void DrawAvatarAt(int x, int y, int size, string avatarId, string username)
+        {
+            if (avatarId == "custom" && customAvatarTexture != null)
+            {
+                // Draw custom image scaled to fit
+                spriteBatch!.Draw(customAvatarTexture, new Rectangle(x, y, size, size), Color.White);
+            }
+            else
+            {
+                int avIdx = Array.FindIndex(AvatarPresets, a => a.id == avatarId);
+                var avStyle = avIdx >= 0 ? AvatarPresets[avIdx] : AvatarPresets[0];
+                spriteBatch!.Draw(pixel!, new Rectangle(x, y, size, size), avStyle.bg);
+                string icon = avStyle.icon != "" ? avStyle.icon : (username.Length > 0 ? username[0].ToString().ToUpper() : "?");
+                int fontSize = size > 40 ? 28 : 18;
+                var charT = textRenderer!.GetTexture(icon, "Segoe UI", fontSize, avStyle.fg);
+                spriteBatch.Draw(charT, new Vector2(x + (size - charT.Width) / 2, y + (size - charT.Height) / 2), Color.White);
+            }
+        }
+
         void SyncSettingsToCloud()
         {
             if (cloudSync == null || settingsManager == null || accountsManager?.LoggedInUser == null) return;
@@ -2754,6 +2859,13 @@ namespace ClickerGame
                     editProfileMessage = "";
                     editProfileMsgTimer = 0f;
                     editProfileSaving = false;
+                    // Load custom avatar if applicable
+                    var lp = LocalProfileData.Load();
+                    if (!string.IsNullOrEmpty(lp.CustomAvatarPath))
+                    {
+                        customAvatarPath = lp.CustomAvatarPath;
+                        LoadCustomAvatarTexture();
+                    }
                     state = GameState.EditProfile;
                     return;
                 }
@@ -2822,10 +2934,7 @@ namespace ClickerGame
             int avIdx = Array.FindIndex(AvatarPresets, a => a.id == p.AvatarId);
             var avStyle = avIdx >= 0 ? AvatarPresets[avIdx] : AvatarPresets[0];
             spriteBatch.Draw(pixel!, new Rectangle(avX - 1, avY - 1, avSize + 2, avSize + 2), avStyle.fg * 0.4f);
-            spriteBatch.Draw(pixel!, new Rectangle(avX, avY, avSize, avSize), avStyle.bg);
-            string avIcon = avStyle.icon != "" ? avStyle.icon : (p.User.Length > 0 ? p.User[0].ToString().ToUpper() : "?");
-            var avLetter = textRenderer!.GetTexture(avIcon, "Segoe UI", 28, avStyle.fg);
-            spriteBatch.Draw(avLetter, new Vector2(avX + (avSize - avLetter.Width) / 2, avY + (avSize - avLetter.Height) / 2), Color.White);
+            DrawAvatarAt(avX, avY, avSize, p.AvatarId, p.User);
 
             // Username
             var nameT = textRenderer!.GetTexture(p.User, "Segoe UI", 22, Color.White);
@@ -2925,6 +3034,13 @@ namespace ClickerGame
             if (editProfileMsgTimer > 0)
                 editProfileMsgTimer -= (float)gameTime.ElapsedGameTime.TotalSeconds;
 
+            // Reload custom avatar texture if file picker finished
+            if (_pendingAvatarReload)
+            {
+                _pendingAvatarReload = false;
+                LoadCustomAvatarTexture();
+            }
+
             if (kb.IsKeyDown(Keys.Escape) && !prevKb.IsKeyDown(Keys.Escape))
             { state = GameState.Profile; return; }
 
@@ -2944,6 +3060,9 @@ namespace ClickerGame
                     editAvatarIndex = (editAvatarIndex - 1 + AvatarPresets.Length) % AvatarPresets.Length;
                 if (kb.IsKeyDown(Keys.Right) && !prevKb.IsKeyDown(Keys.Right))
                     editAvatarIndex = (editAvatarIndex + 1) % AvatarPresets.Length;
+                // Enter on Custom avatar → open file picker
+                if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter) && AvatarPresets[editAvatarIndex].id == "custom")
+                    OpenAvatarFilePicker();
             }
             // Banner selection (Left/Right on field 1)
             else if (editProfileFieldIndex == 1)
@@ -3008,24 +3127,19 @@ namespace ClickerGame
                             viewingProfile.Region = region;
                         }
 
+                        // Always save locally
+                        SaveLocalProfile(avatarId, bannerId, bio, region);
+                        editProfileMessage = Localization.Get("edit_profile_saved");
+                        editProfileMsgTimer = 2.5f;
+
+                        // Try cloud upload in background (non-blocking)
                         if (cloudSync != null)
                         {
-                            editProfileSaving = true;
                             _ = Task.Run(async () =>
                             {
-                                try
-                                {
-                                    var ok = await cloudSync.UploadProfileAsync(user, avatarId, bannerId, bio, region);
-                                    editProfileMessage = ok ? Localization.Get("edit_profile_saved") : Localization.Get("edit_profile_failed");
-                                }
-                                catch { editProfileMessage = Localization.Get("edit_profile_failed"); }
-                                finally { editProfileSaving = false; editProfileMsgTimer = 2.5f; }
+                                try { await cloudSync.UploadProfileAsync(user, avatarId, bannerId, bio, region); }
+                                catch { }
                             });
-                        }
-                        else
-                        {
-                            editProfileMessage = Localization.Get("edit_profile_saved");
-                            editProfileMsgTimer = 2.5f;
                         }
                     }
                 }
@@ -3060,13 +3174,17 @@ namespace ClickerGame
             int avPrevSize = 48;
             int avPrevX = sx + 20;
             spriteBatch.Draw(pixel!, new Rectangle(avPrevX - 1, sy - 1, avPrevSize + 2, avPrevSize + 2), sel0 ? new Color(0, 200, 255) * 0.6f : Color.White * 0.15f);
-            spriteBatch.Draw(pixel!, new Rectangle(avPrevX, sy, avPrevSize, avPrevSize), avPreset.bg);
-            string avChar = avPreset.icon != "" ? avPreset.icon : (accountsManager?.LoggedInUser?.Length > 0 ? accountsManager.LoggedInUser[0].ToString().ToUpper() : "?");
-            var avCharT = textRenderer!.GetTexture(avChar, "Segoe UI", 24, avPreset.fg);
-            spriteBatch.Draw(avCharT, new Vector2(avPrevX + (avPrevSize - avCharT.Width) / 2, sy + (avPrevSize - avCharT.Height) / 2), Color.White);
-            // Name + arrows
-            var avNameT = textRenderer!.GetTexture($"\u25C0  {avPreset.label}  \u25B6", "Segoe UI", 14, sel0 ? Color.White : new Color(180, 180, 200));
-            spriteBatch.Draw(avNameT, new Vector2(avPrevX + avPrevSize + 20, sy + 14), Color.White);
+            DrawAvatarAt(avPrevX, sy, avPrevSize, avPreset.id, accountsManager?.LoggedInUser ?? "?");
+            // Name + arrows + browse button for custom
+            string avLabelText = $"\u25C0  {avPreset.label}  \u25B6";
+            var avNameT = textRenderer!.GetTexture(avLabelText, "Segoe UI", 14, sel0 ? Color.White : new Color(180, 180, 200));
+            spriteBatch.Draw(avNameT, new Vector2(avPrevX + avPrevSize + 20, sy + 6), Color.White);
+            if (avPreset.id == "custom")
+            {
+                string browseHint = customAvatarTexture != null ? Localization.Get("edit_avatar_change") : Localization.Get("edit_avatar_browse");
+                var browseT = textRenderer!.GetTexture($"[Enter] {browseHint}", "Segoe UI", 11, sel0 ? new Color(0, 200, 255) : new Color(100, 100, 130));
+                spriteBatch.Draw(browseT, new Vector2(avPrevX + avPrevSize + 20, sy + 28), Color.White);
+            }
             sy += avPrevSize + 12;
 
             // ── Field 1: Banner ──
@@ -3250,12 +3368,7 @@ namespace ClickerGame
 
                     // Avatar with preset style
                     int avS = 36;
-                    int srAvIdx = Array.FindIndex(AvatarPresets, a => a.id == r.AvatarId);
-                    var srAvStyle = srAvIdx >= 0 ? AvatarPresets[srAvIdx] : AvatarPresets[0];
-                    spriteBatch.Draw(pixel!, new Rectangle(sx + 8, ry + 9, avS, avS), srAvStyle.bg);
-                    string srIcon = srAvStyle.icon != "" ? srAvStyle.icon : (r.Username.Length > 0 ? r.Username[0].ToString().ToUpper() : "?");
-                    var avLetter = textRenderer!.GetTexture(srIcon, "Segoe UI", 18, srAvStyle.fg);
-                    spriteBatch.Draw(avLetter, new Vector2(sx + 8 + (avS - avLetter.Width) / 2, ry + 9 + (avS - avLetter.Height) / 2), Color.White);
+                    DrawAvatarAt(sx + 8, ry + 9, avS, r.AvatarId, r.Username);
 
                     // Name + badges
                     var nameT = textRenderer!.GetTexture(r.Username, "Segoe UI", 15, Color.White);

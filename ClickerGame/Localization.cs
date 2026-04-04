@@ -192,6 +192,8 @@ namespace ClickerGame
             // Edit Profile
             ["edit_profile_title"] = L("EDIT PROFILE", "EDIT PROFILE", "\u7de8\u8f2f\u6a94\u6848", "\u7f16\u8f91\u6863\u6848", "\u7de8\u8f2f\u6a94\u6848"),
             ["edit_avatar"] = L("Avatar", "Avatar", "\u982d\u50cf", "\u5934\u50cf", "\u982d\u50cf"),
+            ["edit_avatar_browse"] = L("Browse Image...", "Browse Image...", "\u700f\u89bd\u5716\u7247...", "\u6d4f\u89c8\u56fe\u7247...", "\u700f\u89bd\u5716\u7247..."),
+            ["edit_avatar_change"] = L("Change Image...", "Change Image...", "\u66f4\u63db\u5716\u7247...", "\u66f4\u6362\u56fe\u7247...", "\u66f4\u63db\u5716\u7247..."),
             ["edit_banner"] = L("Banner", "Banner", "\u6a6b\u5e45", "\u6a2a\u5e45", "\u6a6b\u5e45"),
             ["edit_bio"] = L("Bio", "Bio", "\u7c21\u4ecb", "\u7b80\u4ecb", "\u7c21\u4ecb"),
             ["edit_region"] = L("Region", "Region", "\u5730\u5340", "\u5730\u533a", "\u5730\u5340"),
