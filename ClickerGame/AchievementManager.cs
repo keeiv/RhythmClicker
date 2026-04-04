@@ -101,6 +101,19 @@ namespace ClickerGame
         }
 
         /// <summary>
+        /// Force-unlock an achievement from server sync (no popup).
+        /// </summary>
+        public void ForceUnlock(string id, string unlockedAt)
+        {
+            var ach = _data.Achievements.FirstOrDefault(a => a.Id == id);
+            if (ach == null || ach.Unlocked) return;
+            ach.Unlocked = true;
+            ach.UnlockedAt = !string.IsNullOrEmpty(unlockedAt) ? unlockedAt
+                : DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+            Save();
+        }
+
+        /// <summary>
         /// Check and unlock achievements after a play session.
         /// </summary>
         public void CheckAfterPlay(int totalPlays, int maxCombo, string grade,

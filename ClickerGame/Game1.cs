@@ -3,6 +3,7 @@ using System.IO;
 using System.Diagnostics;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
@@ -94,6 +95,9 @@ namespace ClickerGame
         SettingsManager? settingsManager;
         AchievementManager? achievementManager;
         ReplayManager? replayManager;
+        CloudSyncManager? cloudSync;
+        string syncStatusText = "";
+        float syncStatusTimer = 0f;
 
         // Settings UI state
         int settingsMenuIndex = 0;
@@ -401,6 +405,7 @@ namespace ClickerGame
             settingsManager = new SettingsManager();
             achievementManager = new AchievementManager();
             replayManager = new ReplayManager();
+            cloudSync = new CloudSyncManager();
 
             // Discord RPC
             try { discordRpc = new DiscordRpcManager(); }
@@ -629,6 +634,10 @@ namespace ClickerGame
             if (achievementPopupTimer > 0)
                 achievementPopupTimer -= (float)gameTime.ElapsedGameTime.TotalSeconds;
 
+            // Sync status timer
+            if (syncStatusTimer > 0)
+                syncStatusTimer -= (float)gameTime.ElapsedGameTime.TotalSeconds;
+
             prevKb = kb;
             prevMouseState = mouseState;
             prevScrollValue = mouseState.ScrollWheelValue;
@@ -845,6 +854,24 @@ namespace ClickerGame
                 int totalPlays = summary?.TotalPlays ?? 1;
                 int uniqueSongs = GetUniqueSongsPlayed();
                 achievementManager?.CheckAfterPlay(totalPlays, maxCombo, resultGrade, acc, isFC, uniqueSongs, songs.Count);
+
+                // Cloud sync: upload play + achievements
+                if (cloudSync != null && accountsManager?.LoggedInUser != null)
+                {
+                    var syncUser = accountsManager.LoggedInUser;
+                    var playedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await cloudSync.UploadPlayAsync(syncUser, songId, currentDifficulty,
+                                score, maxCombo, hitCount, missCount, acc, resultGrade, playedAt);
+                            if (achievementManager != null)
+                                await cloudSync.UploadAchievementsAsync(syncUser, achievementManager.GetAll());
+                        }
+                        catch { }
+                    });
+                }
 
                 // Show achievement popups
                 if (achievementManager != null && achievementManager.PendingPopups.Count > 0)
@@ -1187,6 +1214,14 @@ namespace ClickerGame
                 spriteBatch.Draw(achLabel, new Vector2(popX + (popW - achLabel.Width) / 2, popY + 6), Color.White * alpha);
                 var achName = textRenderer!.GetTexture(achievementPopupText, "Segoe UI", 15, Color.White);
                 spriteBatch.Draw(achName, new Vector2(popX + (popW - achName.Width) / 2, popY + 24), Color.White * alpha);
+            }
+
+            // Cloud sync status overlay
+            if (syncStatusTimer > 0 && !string.IsNullOrEmpty(syncStatusText))
+            {
+                float alpha = Math.Min(syncStatusTimer, 1f);
+                var syncTex = textRenderer!.GetTexture("☁ " + syncStatusText, "Segoe UI", 11, new Color(120, 200, 255));
+                spriteBatch.Draw(syncTex, new Vector2(width - syncTex.Width - 12, height - 30), Color.White * alpha);
             }
 
             spriteBatch.End();
@@ -1764,6 +1799,7 @@ namespace ClickerGame
                         }
                         settingsBindingMode = false;
                         settingsManager.Save();
+                        SyncSettingsToCloud();
                         return;
                     }
                 }
@@ -1786,6 +1822,7 @@ namespace ClickerGame
                 }
                 ApplyVolume();
                 settingsManager.Save();
+                SyncSettingsToCloud();
             }
             if (kb.IsKeyDown(Keys.Right) && !prevKb.IsKeyDown(Keys.Right))
             {
@@ -1798,6 +1835,7 @@ namespace ClickerGame
                 }
                 ApplyVolume();
                 settingsManager.Save();
+                SyncSettingsToCloud();
             }
             if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
             {
@@ -2486,17 +2524,39 @@ namespace ClickerGame
             {
                 if (accountsManager != null)
                 {
+                    bool loginOk = false;
+                    string pwHash = AccountsManager.HashPassword(accountPassword);
                     if (accountIsLoginMode)
                     {
                         if (accountsManager.Login(accountUsername, accountPassword, out _))
-                        { accountShowMessage = true; accountMessage = Localization.Get("login_success"); accountPassword = ""; }
+                        { accountShowMessage = true; accountMessage = Localization.Get("login_success"); loginOk = true; accountPassword = ""; }
                         else { accountShowMessage = true; accountMessage = "Invalid credentials"; }
                     }
                     else
                     {
                         if (accountsManager.Register(accountUsername, accountPassword, out _))
-                        { accountShowMessage = true; accountMessage = Localization.Get("register_success"); accountPassword = ""; }
+                        { accountShowMessage = true; accountMessage = Localization.Get("register_success"); loginOk = true; accountPassword = ""; }
                         else { accountShowMessage = true; accountMessage = "Username taken or invalid"; }
+                    }
+                    // Cloud sync after successful login/register
+                    if (loginOk && cloudSync != null)
+                    {
+                        var user = accountsManager.LoggedInUser ?? accountUsername;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (!accountIsLoginMode)
+                                    await cloudSync.RegisterAsync(user, pwHash);
+                                else
+                                    await cloudSync.LoginAsync(user, pwHash);
+
+                                var result = await cloudSync.FullSyncAsync(user, statsDb, achievementManager, settingsManager);
+                                syncStatusText = result.Success ? Localization.Get("sync_ok") : result.Message;
+                                syncStatusTimer = 3f;
+                            }
+                            catch { syncStatusText = "Sync failed"; syncStatusTimer = 3f; }
+                        });
                     }
                 }
                 return;
@@ -2521,6 +2581,18 @@ namespace ClickerGame
             if (k == Keys.OemPeriod) return '.';
             if (k == Keys.Space) return ' ';
             return '\0';
+        }
+
+        void SyncSettingsToCloud()
+        {
+            if (cloudSync == null || settingsManager == null || accountsManager?.LoggedInUser == null) return;
+            var user = accountsManager.LoggedInUser;
+            var settings = settingsManager.Settings;
+            _ = Task.Run(async () =>
+            {
+                try { await cloudSync.UploadSettingsAsync(user, settings); }
+                catch { }
+            });
         }
     }
 }

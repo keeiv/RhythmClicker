@@ -67,6 +67,9 @@ namespace ClickerGame
             ["account_register"] = L("Register", "Register", "\u8a3b\u518a\u5e33\u865f", "\u6ce8\u518c\u8d26\u53f7", "\u8a3b\u518a\u5e33\u865f"),
             ["account_login"] = L("Login", "Login", "\u767b\u5165\u5e33\u865f", "\u767b\u5f55\u8d26\u53f7", "\u767b\u5165\u5e33\u865f"),
             ["login_success"] = L("Login successful", "Login successful", "\u767b\u5165\u6210\u529f", "\u767b\u5f55\u6210\u529f", "\u767b\u5165\u6210\u529f"),
+            ["sync_ok"] = L("Cloud sync complete", "Cloud sync complete", "\u96f2\u7aef\u540c\u6b65\u5b8c\u6210", "\u4e91\u7aef\u540c\u6b65\u5b8c\u6210", "\u96f2\u7aef\u540c\u6b65\u5b8c\u6210"),
+            ["sync_fail"] = L("Cloud sync failed", "Cloud sync failed", "\u96f2\u7aef\u540c\u6b65\u5931\u6557", "\u4e91\u7aef\u540c\u6b65\u5931\u8d25", "\u96f2\u7aef\u540c\u6b65\u5931\u6557"),
+            ["register_success"] = L("Registered", "Registered", "\u8a3b\u518a\u6210\u529f", "\u6ce8\u518c\u6210\u529f", "\u8a3b\u518a\u6210\u529f"),
             ["hint_account"] = L(
                 "Enter Submit  \u00b7  Tab Field  \u00b7  F1 Login/Register  \u00b7  Esc Cancel",
                 "Enter Submit  \u00b7  Tab Field  \u00b7  F1 Login/Register  \u00b7  Esc Cancel",

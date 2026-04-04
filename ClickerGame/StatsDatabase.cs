@@ -159,6 +159,37 @@ namespace ClickerGame
             return list;
         }
 
+        public bool PlayExistsByTime(string user, string songId, string diff, string playedAt)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM plays WHERE user=@u AND song_id=@s AND difficulty=@d AND played_at=@t";
+            cmd.Parameters.AddWithValue("@u", user);
+            cmd.Parameters.AddWithValue("@s", songId);
+            cmd.Parameters.AddWithValue("@d", diff);
+            cmd.Parameters.AddWithValue("@t", playedAt);
+            return Convert.ToInt64(cmd.ExecuteScalar()) > 0;
+        }
+
+        public void RecordPlayWithTime(string user, string songId, string difficulty,
+            int score, int maxCombo, int hit, int miss, double accuracy, string grade, string playedAt)
+        {
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = @"
+                INSERT INTO plays (user, song_id, difficulty, score, max_combo, hit, miss, accuracy, grade, played_at)
+                VALUES (@u, @s, @d, @sc, @mc, @h, @m, @a, @g, @t)";
+            cmd.Parameters.AddWithValue("@u", user ?? "guest");
+            cmd.Parameters.AddWithValue("@s", songId);
+            cmd.Parameters.AddWithValue("@d", difficulty);
+            cmd.Parameters.AddWithValue("@sc", score);
+            cmd.Parameters.AddWithValue("@mc", maxCombo);
+            cmd.Parameters.AddWithValue("@h", hit);
+            cmd.Parameters.AddWithValue("@m", miss);
+            cmd.Parameters.AddWithValue("@a", accuracy);
+            cmd.Parameters.AddWithValue("@g", grade);
+            cmd.Parameters.AddWithValue("@t", playedAt);
+            cmd.ExecuteNonQuery();
+        }
+
         public void Dispose()
         {
             _conn?.Close();

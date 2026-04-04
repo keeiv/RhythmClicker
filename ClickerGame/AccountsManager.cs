@@ -59,7 +59,7 @@ namespace ClickerGame
             RcFileManager.WriteEncrypted(rcPath, accounts);
         }
 
-        static string HashPassword(string password)
+        public static string HashPassword(string password)
         {
             using var sha = SHA256.Create();
             var b = Encoding.UTF8.GetBytes(password);

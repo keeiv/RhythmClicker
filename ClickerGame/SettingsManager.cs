@@ -10,7 +10,7 @@ namespace ClickerGame
     /// </summary>
     public class SettingsManager
     {
-        public GameSettings Settings { get; private set; } = new();
+        public GameSettings Settings { get; set; } = new();
         private readonly string _path;
 
         public SettingsManager(string path = "settings.rc")
