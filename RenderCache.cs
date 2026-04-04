@@ -27,8 +27,8 @@ namespace ClickerGame
         {
             var tex = new Texture2D(_graphics, width, height);
             Color[] data = new Color[width * height];
-            var cTop = new Color(180, 120, 255);
-            var cBottom = new Color(80, 180, 255);
+            var cTop = new Color(12, 12, 30);
+            var cBottom = new Color(22, 25, 55);
             for (int y = 0; y < height; y++)
             {
                 float t = (float)y / Math.Max(1, height - 1);
