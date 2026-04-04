@@ -39,8 +39,14 @@ Assets/.audio_v*
 
 # Published builds
 publish/
+publish-exe/
 *.zip
-*.exe
 
 # tmp_repo (development scratch)
 tmp_repo/
+
+# Runtime data
+Replays/
+achievements.rc
+settings.rc
+*.pdb
