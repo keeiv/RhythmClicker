@@ -188,6 +188,9 @@ namespace ClickerGame
             else // standard, taiko, catch -> convert to 4 lanes
                 bm.Notes = ConvertStandardObjects(hitObjects);
 
+            // Auto-detect break periods from note gaps (if none parsed from [Events])
+            AutoDetectBreaks(bm);
+
             return bm;
         }
 
@@ -203,9 +206,27 @@ namespace ClickerGame
             list.Add((offset, beatLength, inherited));
         }
 
-        /// <summary>Parse [Events] section for video and background image declarations.</summary>
+        /// <summary>Parse [Events] section for video, background image, and break periods.</summary>
         static void ParseEventLine(string line, Beatmap bm)
         {
+            // Break period: "2,startTime,endTime"
+            if (line.StartsWith("2,"))
+            {
+                var parts = line.Split(',');
+                if (parts.Length >= 3 &&
+                    double.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double startMs) &&
+                    double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out double endMs))
+                {
+                    bm.Breaks.Add(new BreakPeriod
+                    {
+                        StartTime = (float)(startMs / 1000.0),
+                        EndTime = (float)(endMs / 1000.0)
+                    });
+                }
+                return;
+            }
             // Video: "Video,offset,"filename"" or "1,offset,"filename""
             if (line.StartsWith("Video,", StringComparison.OrdinalIgnoreCase) || line.StartsWith("1,"))
             {
@@ -358,6 +379,41 @@ namespace ClickerGame
             public double Time;
             public int Type;
             public double EndTime;
+        }
+
+        /// <summary>
+        /// Auto-detect break periods from gaps between notes.
+        /// A gap of 3+ seconds with no notes is treated as a break.
+        /// Merged with any explicitly parsed breaks from [Events].
+        /// </summary>
+        static void AutoDetectBreaks(Beatmap bm)
+        {
+            const float MinBreakGap = 3.0f; // minimum gap in seconds to be considered a break
+            const float BreakPadding = 0.5f; // padding before/after the gap
+
+            if (bm.Notes.Count < 2) return;
+
+            var sorted = bm.Notes.OrderBy(n => n.Time).ToList();
+
+            for (int i = 1; i < sorted.Count; i++)
+            {
+                float gap = sorted[i].Time - sorted[i - 1].Time;
+                if (gap >= MinBreakGap)
+                {
+                    float bStart = sorted[i - 1].Time + BreakPadding;
+                    float bEnd = sorted[i].Time - BreakPadding;
+                    if (bEnd - bStart < 1.5f) continue; // too short to display
+
+                    // Check if this gap overlaps with an existing explicit break
+                    bool overlaps = bm.Breaks.Any(b =>
+                        !(bEnd < b.StartTime || bStart > b.EndTime));
+                    if (!overlaps)
+                        bm.Breaks.Add(new BreakPeriod { StartTime = bStart, EndTime = bEnd });
+                }
+            }
+
+            // Sort breaks by start time
+            bm.Breaks.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
         }
     }
 }

@@ -4,6 +4,12 @@ using System.Text.Json;
 
 namespace ClickerGame
 {
+    public class BreakPeriod
+    {
+        public float StartTime { get; set; }
+        public float EndTime { get; set; }
+    }
+
     public class Beatmap
     {
         public string Name { get; set; } = "";
@@ -13,6 +19,7 @@ namespace ClickerGame
         public string BackgroundImage { get; set; } = "";
         public float Bpm { get; set; }
         public List<Note> Notes { get; set; } = new();
+        public List<BreakPeriod> Breaks { get; set; } = new();
 
         public static Beatmap LoadFromString(string s)
         {

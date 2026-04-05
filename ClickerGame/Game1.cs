@@ -215,6 +215,10 @@ namespace ClickerGame
         string currentVideoPath = "";
         string currentBgImagePath = "";
 
+        // Break period tracking
+        bool inBreak = false;
+        BreakPeriod? currentBreak = null;
+
         // Combo tier
         int ComboTier => combo >= GameConfig.ComboTier4 ? 4
                        : combo >= GameConfig.ComboTier3 ? 3
@@ -999,6 +1003,17 @@ namespace ClickerGame
             // Update video background
             videoPlayer?.UpdateTime(time);
 
+            // Break period detection
+            inBreak = false; currentBreak = null;
+            if (beatmap?.Breaks != null)
+            {
+                foreach (var bp in beatmap.Breaks)
+                {
+                    if (time >= bp.StartTime && time <= bp.EndTime)
+                    { inBreak = true; currentBreak = bp; break; }
+                }
+            }
+
             for (int c = 0; c < 4; c++)
             {
                 if (kb.IsKeyDown(keys[c]) && !prevKb.IsKeyDown(keys[c]))
@@ -1376,6 +1391,7 @@ namespace ClickerGame
             score = 0; combo = 0; maxCombo = 0; hitCount = 0; missCount = 0;
             perfectCount = 0; greatCount = 0; goodCount = 0;
             hp = GameConfig.InitialHP; hpDepleted = false;
+            inBreak = false; currentBreak = null;
             summaryShown = false; keyFlashes.Clear(); particles.Clear(); judgmentPopups.Clear();
             shakeTimer = 0; beatPulseAlpha = 0;
             LoadCurrentSong();
@@ -1631,17 +1647,78 @@ namespace ClickerGame
                 spriteBatch.Draw(pixel!, new Rectangle(0, 0, (int)(width * pr), 3), glow);
             }
 
-            // ═══ SAO-style HP bar (right side) ═══
+            // ═══ HP bar (right side) ═══
             DrawHPBar();
 
             // ═══ Judgment counter (left side) ═══
             DrawJudgmentCounter();
+
+            // ═══ Break overlay ═══
+            if (inBreak && currentBreak != null)
+                DrawBreakOverlay();
 
             if (editorMode)
             {
                 var et = textRenderer!.GetTexture(Localization.Get("editor_hint"), "Segoe UI", 14, Color.Yellow);
                 spriteBatch.Draw(et, new Vector2((width - et.Width) / 2, height - 22), Color.White);
             }
+        }
+
+        void DrawBreakOverlay()
+        {
+            float time = (float)stopwatch.Elapsed.TotalSeconds;
+            float remaining = currentBreak!.EndTime - time;
+            float breakDuration = currentBreak.EndTime - currentBreak.StartTime;
+            float breakProgress = Math.Clamp((time - currentBreak.StartTime) / breakDuration, 0, 1);
+
+            // Fade in/out
+            float fadeIn = Math.Clamp((time - currentBreak.StartTime) / 0.5f, 0, 1);
+            float fadeOut = Math.Clamp(remaining / 0.5f, 0, 1);
+            float alpha = Math.Min(fadeIn, fadeOut);
+
+            // Dim overlay
+            spriteBatch!.Draw(pixel!, new Rectangle(0, 0, width, height), Color.Black * (0.5f * alpha));
+
+            int cx = width / 2;
+            int cy = height / 2;
+
+            // "Break" title
+            var breakTitle = textRenderer!.GetTexture("Break", "Segoe UI", 36, Color.White);
+            spriteBatch.Draw(breakTitle, new Vector2(cx - breakTitle.Width / 2, cy - 80), Color.White * alpha);
+
+            // Countdown timer
+            int secs = Math.Max(0, (int)Math.Ceiling(remaining));
+            var countdownTex = textRenderer!.GetTexture($"{secs}s", "Segoe UI", 48, new Color(0, 200, 255));
+            spriteBatch.Draw(countdownTex, new Vector2(cx - countdownTex.Width / 2, cy - 30), Color.White * alpha);
+
+            // Current grade
+            int total = hitCount + missCount;
+            double acc = total > 0 ? (double)hitCount / total * 100 : 100;
+            double pct = maxScore > 0 ? (double)score / maxScore : 1.0;
+            string grade = pct >= 0.95 ? "SS" : pct >= 0.85 ? "S" : pct >= 0.75 ? "A"
+                         : pct >= 0.60 ? "B" : pct >= 0.40 ? "C" : "D";
+
+            Color gradeColor = grade switch
+            {
+                "SS" => new Color(255, 220, 50),
+                "S" => new Color(255, 200, 50),
+                "A" => new Color(80, 255, 120),
+                "B" => new Color(0, 200, 255),
+                "C" => new Color(200, 120, 255),
+                _ => new Color(255, 80, 80)
+            };
+            var gradeTex = textRenderer!.GetTexture(grade, "Segoe UI", 42, gradeColor);
+            spriteBatch.Draw(gradeTex, new Vector2(cx - gradeTex.Width / 2, cy + 30), Color.White * alpha);
+
+            // Accuracy
+            var accTex = textRenderer!.GetTexture($"{acc:F1}%", "Segoe UI", 22, new Color(200, 200, 220));
+            spriteBatch.Draw(accTex, new Vector2(cx - accTex.Width / 2, cy + 80), Color.White * alpha);
+
+            // Progress bar for break
+            int barW = 200, barH = 4;
+            int barX = cx - barW / 2, barY2 = cy + 115;
+            spriteBatch.Draw(pixel!, new Rectangle(barX, barY2, barW, barH), Color.White * (0.15f * alpha));
+            spriteBatch.Draw(pixel!, new Rectangle(barX, barY2, (int)(barW * breakProgress), barH), new Color(0, 200, 255) * (0.7f * alpha));
         }
 
         void DrawHPBar()
