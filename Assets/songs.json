@@ -65,52 +65,12 @@
     ]
   },
   {
-    "Id": "heat_abnormal",
-    "Title": "Heat abnormal",
-    "File": "2198644_25-ji,_nightcord_de._x_kaito_-_heat_abnormal_audio.wav",
+    "Id": "remember",
+    "Title": "Remember",
+    "File": "2498785_yuigot_feat._yachiyo_runami_(cv__saori_hayami)_-_remember_audio.wav",
     "Difficulties": [
-      "chitoses_master",
-      "easy",
-      "el_nino",
-      "hard",
-      "insane",
-      "kuroises_expert",
-      "normal"
-    ]
-  },
-  {
-    "Id": "monitoring_feat._hatsune_miku",
-    "Title": "Monitoring feat. Hatsune Miku",
-    "File": "2306569_deco_27_-_monitoring_feat._hatsune_miku_audio.wav",
-    "Difficulties": [
-      "easy",
-      "hard",
-      "heroines_another",
-      "insane",
-      "let_me_see_inside_you",
-      "normal"
-    ]
-  },
-  {
-    "Id": "christmas_slop",
-    "Title": "Christmas Slop",
-    "File": "2472271_altermis_\u0026_takehirotei_\u0026_violet_delta_-_christmas_slop_audio.wav",
-    "Difficulties": [
-      "akitoshis_beginner",
-      "amats_hard",
-      "fuxis_expert",
-      "harumis_normal",
-      "kukis_expert\u002B",
-      "ninos_insane\u002B",
-      "nymphes_ultra\u002B",
-      "parad0xas_extreme",
-      "pikas_extra",
-      "rams_ultra",
-      "reforms_extreme\u002B",
-      "riots_insane",
-      "sloppy_gift",
-      "smokes_extra\u002B",
-      "takes_easy"
+      "miracle_transcending_8000_years",
+      "oni"
     ]
   }
 ]

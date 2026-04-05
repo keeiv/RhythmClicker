@@ -102,7 +102,12 @@ namespace ClickerGame
 
             try
             {
-                _mediaFile = FFMediaToolkit.Decoding.MediaFile.Open(videoPath);
+                // Explicitly request BGR24 output for consistent pixel format across all containers (MP4, AVI, MKV, etc.)
+                var options = new FFMediaToolkit.Decoding.MediaOptions
+                {
+                    VideoPixelFormat = FFMediaToolkit.Graphics.ImagePixelFormat.Bgr24
+                };
+                _mediaFile = FFMediaToolkit.Decoding.MediaFile.Open(videoPath, options);
                 if (!_mediaFile.HasVideo) { _mediaFile.Dispose(); _mediaFile = null; return false; }
 
                 var info = _mediaFile.Video.Info;

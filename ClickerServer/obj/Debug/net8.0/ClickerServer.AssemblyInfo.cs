@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ClickerServer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9a218cf4f24ca9e3065fd58af449f5fc8fb1aa5b")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+c666aa486335fa87260082f4eb065d9fbccea705")]
 [assembly: System.Reflection.AssemblyProductAttribute("ClickerServer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ClickerServer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
