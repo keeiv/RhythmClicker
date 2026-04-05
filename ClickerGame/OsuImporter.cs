@@ -182,11 +182,15 @@ namespace ClickerGame
             else
                 bm.Bpm = 120;
 
-            // Convert hit objects to 4-lane notes
-            if (mode == 3) // osu!mania
-                bm.Notes = ConvertManiaObjects(hitObjects, circleSize);
-            else // standard, taiko, catch -> convert to 4 lanes
-                bm.Notes = ConvertStandardObjects(hitObjects);
+            // Convert hit objects to 4-lane notes based on game mode
+            bm.Notes = mode switch
+            {
+                0 => ConvertStandardObjects(hitObjects, timingPoints),
+                1 => ConvertTaikoObjects(hitObjects, timingPoints),
+                2 => ConvertCatchObjects(hitObjects, timingPoints),
+                3 => ConvertManiaObjects(hitObjects, circleSize),
+                _ => ConvertStandardObjects(hitObjects, timingPoints)
+            };
 
             // Auto-detect break periods from note gaps (if none parsed from [Events])
             AutoDetectBreaks(bm);
@@ -268,14 +272,33 @@ namespace ClickerGame
                 System.Globalization.CultureInfo.InvariantCulture, out obj.Time)) return;
             if (!int.TryParse(parts[3], out obj.Type)) return;
 
-            // Check for hold note end time (mania) - in extras after ':'
-            if ((obj.Type & 128) != 0 && parts.Length >= 6)
+            // hitSound is at index 4
+            if (parts.Length >= 5)
+                int.TryParse(parts[4], out obj.HitSound);
+
+            // Mania hold note: endTime in extras after ':'
+            if (obj.IsManiaHold && parts.Length >= 6)
             {
-                // Format: x,y,time,type,hitSound,endTime:extras
                 var endParts = parts[5].Split(':');
                 if (endParts.Length > 0)
                     double.TryParse(endParts[0], System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out obj.EndTime);
+            }
+
+            // Slider: objectParams = curveType|...,slides,length
+            if (obj.IsSlider && parts.Length >= 8)
+            {
+                // parts[5] = curveType|curvePoints, parts[6] = slides, parts[7] = length
+                int.TryParse(parts[6], out obj.RepeatCount);
+                double.TryParse(parts[7], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out obj.SliderLength);
+            }
+
+            // Spinner: endTime at parts[5]
+            if (obj.IsSpinner && parts.Length >= 6)
+            {
+                double.TryParse(parts[5], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out obj.EndTime);
             }
 
             list.Add(obj);
@@ -308,22 +331,225 @@ namespace ClickerGame
             return notes;
         }
 
-        static List<Note> ConvertStandardObjects(List<OsuHitObject> objects)
+        /// <summary>
+        /// osu! standard (mode 0): circles, sliders, spinners.
+        /// Circles → single note at x-based lane.
+        /// Sliders → note at start + additional notes along slider ticks.
+        /// Spinners → burst of notes spread across lanes.
+        /// </summary>
+        static List<Note> ConvertStandardObjects(List<OsuHitObject> objects,
+            List<(double offset, double beatLength, bool inherited)> timingPoints)
         {
             var notes = new List<Note>();
 
             foreach (var obj in objects)
             {
-                // Map x position (0-512) to 4 lanes
-                int lane = (int)(obj.X / 128.0);
-                lane = Math.Clamp(lane, 0, 3);
-
                 float timeSec = (float)(obj.Time / 1000.0);
-                notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = lane });
+                int lane = Math.Clamp((int)(obj.X / 128.0), 0, 3);
+
+                if (obj.IsSpinner)
+                {
+                    // Spinner: generate burst notes across all 4 lanes
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double interval = Math.Max(beatLen / 4.0, 80); // quarter-beat ticks
+                    double endMs = obj.EndTime > obj.Time ? obj.EndTime : obj.Time + 1000;
+                    int col = 0;
+                    for (double t = obj.Time; t <= endMs; t += interval)
+                    {
+                        notes.Add(new Note { Time = (float)Math.Round(t / 1000.0, 3), Column = col % 4 });
+                        col++;
+                    }
+                }
+                else if (obj.IsSlider)
+                {
+                    // Slider head
+                    notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = lane });
+
+                    // Generate slider tick notes
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double sliderVelocity = GetSliderVelocity(timingPoints, obj.Time);
+                    double pixelsPerBeat = sliderVelocity * 100.0; // base SV * 100
+                    double sliderDuration = obj.SliderLength / pixelsPerBeat * beatLen;
+                    double totalDuration = sliderDuration * Math.Max(obj.RepeatCount, 1);
+
+                    // Add notes at each repeat point
+                    int repeats = Math.Max(obj.RepeatCount, 1);
+                    for (int r = 1; r <= repeats; r++)
+                    {
+                        double tickTime = obj.Time + sliderDuration * r;
+                        int tickLane = (r % 2 == 0) ? lane : Math.Clamp(lane + 1, 0, 3);
+                        notes.Add(new Note { Time = (float)Math.Round(tickTime / 1000.0, 3), Column = tickLane });
+                    }
+                }
+                else
+                {
+                    // Circle: single note
+                    notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = lane });
+                }
             }
 
             notes.Sort((a, b) => a.Time.CompareTo(b.Time));
             return notes;
+        }
+
+        /// <summary>
+        /// osu!taiko (mode 1): don (red) and kat (blue) drum hits.
+        /// Don (centre) → lanes 1,2. Kat (rim) → lanes 0,3.
+        /// Big notes → two simultaneous notes.
+        /// Drumrolls → tick notes. Dendens → spinner burst.
+        /// </summary>
+        static List<Note> ConvertTaikoObjects(List<OsuHitObject> objects,
+            List<(double offset, double beatLength, bool inherited)> timingPoints)
+        {
+            var notes = new List<Note>();
+            var rng = new Random(42);
+
+            foreach (var obj in objects)
+            {
+                float timeSec = (float)(obj.Time / 1000.0);
+                bool isRim = (obj.HitSound & 2) != 0 || (obj.HitSound & 8) != 0; // whistle or clap = kat/rim
+                bool isBig = (obj.HitSound & 4) != 0; // finish = big note
+
+                if (obj.IsSpinner)
+                {
+                    // Denden (spinner): rapid alternating hits
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double interval = Math.Max(beatLen / 4.0, 100);
+                    double endMs = obj.EndTime > obj.Time ? obj.EndTime : obj.Time + 1000;
+                    bool alt = false;
+                    for (double t = obj.Time; t <= endMs; t += interval)
+                    {
+                        int col = alt ? 0 : 3; // alternate rim lanes
+                        notes.Add(new Note { Time = (float)Math.Round(t / 1000.0, 3), Column = col });
+                        alt = !alt;
+                    }
+                }
+                else if (obj.IsSlider)
+                {
+                    // Drumroll: tick notes at beat subdivisions
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double sliderVelocity = GetSliderVelocity(timingPoints, obj.Time);
+                    double pixelsPerBeat = sliderVelocity * 100.0;
+                    double sliderDuration = obj.SliderLength / pixelsPerBeat * beatLen;
+                    double totalDuration = sliderDuration * Math.Max(obj.RepeatCount, 1);
+                    double interval = Math.Max(beatLen / 4.0, 80);
+
+                    for (double t = obj.Time; t <= obj.Time + totalDuration; t += interval)
+                    {
+                        int col = rng.Next(1, 3); // centre lanes 1-2
+                        notes.Add(new Note { Time = (float)Math.Round(t / 1000.0, 3), Column = col });
+                    }
+                }
+                else
+                {
+                    // Regular hit
+                    if (isRim)
+                    {
+                        int col = rng.Next(0, 2) == 0 ? 0 : 3; // rim = outer lanes
+                        notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = col });
+                        if (isBig) // big kat: add second lane too
+                            notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = col == 0 ? 3 : 0 });
+                    }
+                    else
+                    {
+                        int col = rng.Next(1, 3); // don = centre lanes 1-2
+                        notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = col });
+                        if (isBig) // big don: add both centre lanes
+                            notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = col == 1 ? 2 : 1 });
+                    }
+                }
+            }
+
+            notes.Sort((a, b) => a.Time.CompareTo(b.Time));
+            return notes;
+        }
+
+        /// <summary>
+        /// osu!catch (mode 2): fruits at horizontal positions.
+        /// Fruits → lane based on x. Juice streams → notes along slider path.
+        /// Banana showers → random burst notes.
+        /// </summary>
+        static List<Note> ConvertCatchObjects(List<OsuHitObject> objects,
+            List<(double offset, double beatLength, bool inherited)> timingPoints)
+        {
+            var notes = new List<Note>();
+            var rng = new Random(42);
+
+            foreach (var obj in objects)
+            {
+                float timeSec = (float)(obj.Time / 1000.0);
+                int lane = Math.Clamp((int)(obj.X / 128.0), 0, 3);
+
+                if (obj.IsSpinner)
+                {
+                    // Banana shower: random fruits across all lanes
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double interval = Math.Max(beatLen / 2.0, 120);
+                    double endMs = obj.EndTime > obj.Time ? obj.EndTime : obj.Time + 1000;
+                    for (double t = obj.Time; t <= endMs; t += interval)
+                    {
+                        notes.Add(new Note { Time = (float)Math.Round(t / 1000.0, 3), Column = rng.Next(0, 4) });
+                    }
+                }
+                else if (obj.IsSlider)
+                {
+                    // Juice stream: note at start + droplets along duration
+                    notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = lane });
+
+                    double beatLen = GetBeatLength(timingPoints, obj.Time);
+                    double sliderVelocity = GetSliderVelocity(timingPoints, obj.Time);
+                    double pixelsPerBeat = sliderVelocity * 100.0;
+                    double sliderDuration = obj.SliderLength / pixelsPerBeat * beatLen;
+                    double totalDuration = sliderDuration * Math.Max(obj.RepeatCount, 1);
+                    double interval = Math.Max(beatLen / 2.0, 100);
+
+                    int prevLane = lane;
+                    for (double t = obj.Time + interval; t <= obj.Time + totalDuration; t += interval)
+                    {
+                        // Droplets drift left/right
+                        int drift = rng.Next(-1, 2);
+                        int newLane = Math.Clamp(prevLane + drift, 0, 3);
+                        notes.Add(new Note { Time = (float)Math.Round(t / 1000.0, 3), Column = newLane });
+                        prevLane = newLane;
+                    }
+                }
+                else
+                {
+                    // Fruit: single note
+                    notes.Add(new Note { Time = (float)Math.Round(timeSec, 3), Column = lane });
+                }
+            }
+
+            notes.Sort((a, b) => a.Time.CompareTo(b.Time));
+            return notes;
+        }
+
+        /// <summary>Get the beat length (ms per beat) at a given time from uninherited timing points.</summary>
+        static double GetBeatLength(List<(double offset, double beatLength, bool inherited)> timingPoints, double timeMs)
+        {
+            double result = 500; // default 120 BPM
+            foreach (var tp in timingPoints)
+            {
+                if (tp.inherited) continue; // skip inherited (SV) points
+                if (tp.offset <= timeMs) result = tp.beatLength;
+                else break;
+            }
+            return Math.Max(result, 1);
+        }
+
+        /// <summary>Get the slider velocity multiplier at a given time from inherited timing points.</summary>
+        static double GetSliderVelocity(List<(double offset, double beatLength, bool inherited)> timingPoints, double timeMs)
+        {
+            double sv = 1.0;
+            foreach (var tp in timingPoints)
+            {
+                if (tp.offset > timeMs) break;
+                if (tp.inherited && tp.beatLength < 0)
+                    sv = -100.0 / tp.beatLength; // inherited point: SV = -100/beatLength
+                else if (!tp.inherited)
+                    sv = 1.0; // reset SV on uninherited point
+            }
+            return Math.Max(sv, 0.1);
         }
 
         /// <summary>Convert any audio format (MP3, OGG, WAV, etc.) to 16-bit PCM WAV.</summary>
@@ -378,7 +604,15 @@ namespace ClickerGame
             public int X, Y;
             public double Time;
             public int Type;
-            public double EndTime;
+            public int HitSound;
+            public double EndTime;     // mania hold end, spinner end
+            public int RepeatCount;    // slider repeats
+            public double SliderLength; // slider pixel length
+
+            public bool IsCircle => (Type & 1) != 0;
+            public bool IsSlider => (Type & 2) != 0;
+            public bool IsSpinner => (Type & 8) != 0;
+            public bool IsManiaHold => (Type & 128) != 0;
         }
 
         /// <summary>
