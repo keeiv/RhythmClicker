@@ -200,6 +200,21 @@ namespace ClickerGame
         SoundEffect? sfxHit;
         SoundEffect? sfxMiss;
 
+        // HP system (SAO-style)
+        float hp = GameConfig.InitialHP;
+        bool hpDepleted = false;
+
+        // Judgment counters
+        int perfectCount = 0;
+        int greatCount = 0;
+        int goodCount = 0;
+
+        // Video background
+        VideoBackgroundPlayer? videoPlayer;
+        Texture2D? bgImageTexture;
+        string currentVideoPath = "";
+        string currentBgImagePath = "";
+
         // Combo tier
         int ComboTier => combo >= GameConfig.ComboTier4 ? 4
                        : combo >= GameConfig.ComboTier3 ? 3
@@ -276,6 +291,11 @@ namespace ClickerGame
             IsMouseVisible = true;
             Window.Title = "RhythmClicker";
             Window.AllowUserResizing = false;
+
+            // Low-latency settings for better hit responsiveness
+            IsFixedTimeStep = false;
+            graphics!.SynchronizeWithVerticalRetrace = false;
+            graphics.ApplyChanges();
 
             // File drop for editor audio import
             Window.FileDrop += OnFileDrop;
@@ -445,6 +465,9 @@ namespace ClickerGame
             sfxHit = GenerateHitSfx();
             sfxMiss = GenerateMissSfx();
 
+            // Initialize video background player
+            videoPlayer = new VideoBackgroundPlayer(GraphicsDevice);
+
             textRenderer.Precache("CLICK", "Segoe UI", 56, Color.White);
             foreach (var lk in LaneKeys) textRenderer.Precache(lk, "Segoe UI", 18, new Color(180, 180, 200));
 
@@ -491,6 +514,8 @@ namespace ClickerGame
             textRenderer?.Dispose();
             statsDb?.Dispose();
             discordRpc?.Dispose();
+            videoPlayer?.Dispose();
+            bgImageTexture?.Dispose();
             base.UnloadContent();
         }
 
@@ -661,7 +686,7 @@ namespace ClickerGame
             {
                 if (state == GameState.Playing)
                 {
-                    songInstance?.Stop(); stopwatch.Stop();
+                    songInstance?.Stop(); stopwatch.Stop(); videoPlayer?.Stop();
                     state = GameState.Menu; ExitBorderlessFullscreen();
                     menuMusicInstance?.Play(); discordRpc?.SetMenu();
                 }
@@ -765,9 +790,84 @@ namespace ClickerGame
                 LoadCurrentSong();
             }
 
-            if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
+            // ═══ Mouse click support for menu ═══
+            bool mouseClicked = mouseState.LeftButton == ButtonState.Pressed && prevMouseState.LeftButton == ButtonState.Released;
+            if (mouseClicked)
             {
-                var key = menuKeys[currentMenuIndex];
+                int mx = mouseState.X, my = mouseState.Y;
+                int cx = width / 2;
+
+                // Check menu button clicks
+                int optW = 240, optH = 38, gap = 6;
+                int optX = cx - optW / 2;
+                // Calculate cardY based on DrawMenu layout
+                var titleTexH = 48 + 8; // approximate title height
+                int scroll = -menuScrollOffset;
+                int titleY = 80 + scroll;
+                int cardY = titleY + titleTexH + 24 + 98;
+
+                for (int i = 0; i < menuKeys.Length; i++)
+                {
+                    var btn = new Rectangle(optX, cardY + i * (optH + gap), optW, optH);
+                    if (mx >= btn.Left && mx <= btn.Right && my >= btn.Top && my <= btn.Bottom)
+                    {
+                        currentMenuIndex = i;
+                        // Trigger the menu action
+                        ExecuteMenuAction(menuKeys[i]);
+                        return;
+                    }
+                }
+
+                // Check difficulty pill clicks
+                if (songs.Count > 0)
+                {
+                    var s = songs[currentSongIndex];
+                    int pillY = titleY + titleTexH + 24 + 30;
+                    int pillGap = 8;
+                    int totalPW = 0;
+                    var pillWidths = new int[s.Difficulties.Count];
+                    for (int i = 0; i < s.Difficulties.Count; i++)
+                        pillWidths[i] = DiffShort(s.Difficulties[i]).Length * 9 + 20; // approximate
+                    for (int i = 0; i < s.Difficulties.Count; i++)
+                        totalPW += pillWidths[i] + (i > 0 ? pillGap : 0);
+                    int px = cx - totalPW / 2;
+                    for (int i = 0; i < s.Difficulties.Count; i++)
+                    {
+                        var pillRect = new Rectangle(px, pillY, pillWidths[i], 26);
+                        if (mx >= pillRect.Left && mx <= pillRect.Right && my >= pillRect.Top && my <= pillRect.Bottom)
+                        {
+                            currentDifficulty = s.Difficulties[i];
+                            LoadCurrentSong();
+                            return;
+                        }
+                        px += pillWidths[i] + pillGap;
+                    }
+                }
+            }
+
+            // Mouse hover for menu items
+            {
+                int mx2 = mouseState.X, my2 = mouseState.Y;
+                int cx2 = width / 2;
+                int optW2 = 240, optH2 = 38, gap2 = 6;
+                int optX2 = cx2 - optW2 / 2;
+                int scroll2 = -menuScrollOffset;
+                int titleY2 = 80 + scroll2;
+                int cardY2 = titleY2 + 48 + 8 + 24 + 98;
+                for (int i = 0; i < menuKeys.Length; i++)
+                {
+                    var btn = new Rectangle(optX2, cardY2 + i * (optH2 + gap2), optW2, optH2);
+                    if (mx2 >= btn.Left && mx2 <= btn.Right && my2 >= btn.Top && my2 <= btn.Bottom)
+                    { currentMenuIndex = i; break; }
+                }
+            }
+
+            if (kb.IsKeyDown(Keys.Enter) && !prevKb.IsKeyDown(Keys.Enter))
+                ExecuteMenuAction(menuKeys[currentMenuIndex]);
+        }
+
+        void ExecuteMenuAction(string key)
+        {
                 if (key == "menu_start") StartPlaying(false);
                 else if (key == "menu_editor")
                 {
@@ -860,7 +960,6 @@ namespace ClickerGame
                     if (languageMenuIndex < 0) languageMenuIndex = 0;
                 }
                 else if (key == "menu_exit") Exit();
-            }
         }
 
         void UpdateLanguage()
@@ -897,6 +996,9 @@ namespace ClickerGame
             float adjTime = time + offset;
             Keys[] keys = GetLaneKeys();
 
+            // Update video background
+            videoPlayer?.UpdateTime(time);
+
             for (int c = 0; c < 4; c++)
             {
                 if (kb.IsKeyDown(keys[c]) && !prevKb.IsKeyDown(keys[c]))
@@ -915,15 +1017,27 @@ namespace ClickerGame
                             var n = node.Value;
                             if (n.Column != c) continue;
                             float dt = Math.Abs(n.Time - adjTime);
-                            if (dt <= 0.30f && dt < best) { best = dt; nearest = n; nearestNode = node; }
+                            if (dt <= GameConfig.GoodWindow && dt < best) { best = dt; nearest = n; nearestNode = node; }
                         }
                         if (nearestNode != null)
                         {
                             notes.Remove(nearestNode);
                             int pts; string jText; Color jColor;
-                            if (best <= GameConfig.PerfectWindow) { pts = GameConfig.PerfectScore; jText = "PERFECT"; jColor = new Color(255, 220, 50); }
-                            else if (best <= GameConfig.GreatWindow) { pts = GameConfig.GreatScore; jText = "GREAT"; jColor = new Color(80, 255, 120); }
-                            else { pts = GameConfig.GoodScore; jText = "GOOD"; jColor = new Color(0, 200, 255); }
+                            if (best <= GameConfig.PerfectWindow)
+                            {
+                                pts = GameConfig.PerfectScore; jText = "PERFECT"; jColor = new Color(255, 220, 50);
+                                hp = Math.Min(GameConfig.MaxHP, hp + GameConfig.HPGainPerfect); perfectCount++;
+                            }
+                            else if (best <= GameConfig.GreatWindow)
+                            {
+                                pts = GameConfig.GreatScore; jText = "GREAT"; jColor = new Color(80, 255, 120);
+                                hp = Math.Min(GameConfig.MaxHP, hp + GameConfig.HPGainGreat); greatCount++;
+                            }
+                            else
+                            {
+                                pts = GameConfig.GoodScore; jText = "GOOD"; jColor = new Color(0, 200, 255);
+                                hp = Math.Min(GameConfig.MaxHP, hp + GameConfig.HPGainGood); goodCount++;
+                            }
 
                             score += pts; combo++; hitCount++;
                             if (combo > maxCombo) maxCombo = combo;
@@ -955,12 +1069,16 @@ namespace ClickerGame
                     new Beatmap { Notes = new List<Note>(notes) });
             }
 
-            // End detection
-            if (!summaryShown && (notes.Count == 0 || stopwatch.Elapsed.TotalSeconds >= songDurationSeconds + 0.1))
+            // End detection (HP depleted or song finished)
+            bool hpFail = hp <= 0 && !hpDepleted;
+            if (hpFail) hpDepleted = true;
+
+            if (!summaryShown && (hpDepleted || notes.Count == 0 || stopwatch.Elapsed.TotalSeconds >= songDurationSeconds + 0.1))
             {
                 summaryShown = true; state = GameState.Result; songInstance?.Stop();
+                videoPlayer?.Stop();
                 var pct = maxScore > 0 ? (double)score / maxScore : 0.0;
-                resultGrade = pct >= 0.95 ? "SS" : pct >= 0.85 ? "S" : pct >= 0.75 ? "A"
+                resultGrade = hpDepleted ? "F" : pct >= 0.95 ? "SS" : pct >= 0.85 ? "S" : pct >= 0.75 ? "A"
                             : pct >= 0.60 ? "B" : pct >= 0.40 ? "C" : "D";
                 resultMenuIndex = 0;
                 discordRpc?.SetResult(resultGrade, score);
@@ -1023,16 +1141,20 @@ namespace ClickerGame
             for (int i = judgmentPopups.Count - 1; i >= 0; i--)
             { var j = judgmentPopups[i]; j.Timer -= dt2; j.Position = new Vector2(j.Position.X, j.Position.Y - 45f * dt2); if (j.Timer <= 0) judgmentPopups.RemoveAt(i); }
 
+            // Fast miss detection - notes are missed shortly after passing the hit zone
             float pTime = (float)stopwatch.Elapsed.TotalSeconds + offset;
             for (var mN = notes.First; mN != null;)
             {
                 var nxt = mN.Next;
-                if (pTime - mN.Value.Time > GameConfig.ApproachTime + 0.75f)
+                if (pTime - mN.Value.Time > GameConfig.MissWindow)
                 {
                     int col = mN.Value.Column; notes.Remove(mN); combo = 0; missCount++;
+                    hp = Math.Max(0, hp - GameConfig.HPDrainMiss);
                     float sfxVol = (settingsManager?.Settings.SfxVolume ?? 0.8f);
                     sfxMiss?.Play(0.35f * sfxVol, 0f, 0f);
                     replayManager?.RecordEvent(pTime, col, "MISS", 0, 0);
+                    judgmentPopups.Add(new JudgmentPopup { Text = "MISS", Color = new Color(255, 80, 80), Timer = 0.5f,
+                        Position = new Vector2(LaneLeft + col * LaneWidth + LaneWidth / 2, HitZoneY - 30) });
                     if (keyFlashPool != null)
                     { var k = keyFlashPool.Rent(); k.Reset(new Rectangle(LaneLeft + col * LaneWidth + 4, HitZoneY, LaneWidth - 8, HitZoneHeight), Color.Red, GameConfig.MissFlashDuration); keyFlashes.Add(k); }
                 }
@@ -1252,9 +1374,15 @@ namespace ClickerGame
             editorMode = editor;
             state = GameState.Playing;
             score = 0; combo = 0; maxCombo = 0; hitCount = 0; missCount = 0;
+            perfectCount = 0; greatCount = 0; goodCount = 0;
+            hp = GameConfig.InitialHP; hpDepleted = false;
             summaryShown = false; keyFlashes.Clear(); particles.Clear(); judgmentPopups.Clear();
             shakeTimer = 0; beatPulseAlpha = 0;
             LoadCurrentSong();
+
+            // Load video/background for current beatmap
+            LoadBeatmapMedia();
+
             EnterBorderlessFullscreen();
             menuMusicInstance?.Stop();
             replayManager?.StartRecording();
@@ -1265,8 +1393,48 @@ namespace ClickerGame
                 songInstance.Play();
             }
 
+            // Start video playback
+            if (videoPlayer != null && videoPlayer.HasVideo)
+                videoPlayer.Play();
+
             string title = songs.Count > 0 ? songs[currentSongIndex].Title : "Unknown";
             discordRpc?.SetPlaying(title, DiffShort(currentDifficulty));
+        }
+
+        void LoadBeatmapMedia()
+        {
+            // Stop previous video
+            videoPlayer?.Stop();
+            videoPlayer?.Dispose();
+            videoPlayer = new VideoBackgroundPlayer(GraphicsDevice);
+
+            bgImageTexture?.Dispose();
+            bgImageTexture = null;
+
+            if (beatmap == null) return;
+
+            // Try loading video
+            if (!string.IsNullOrEmpty(beatmap.VideoFile))
+            {
+                string videoPath = Path.Combine("Assets", beatmap.VideoFile);
+                if (File.Exists(videoPath))
+                    videoPlayer.Open(videoPath);
+            }
+
+            // Try loading background image
+            if (!string.IsNullOrEmpty(beatmap.BackgroundImage))
+            {
+                string bgPath = Path.Combine("Assets", beatmap.BackgroundImage);
+                if (File.Exists(bgPath))
+                {
+                    try
+                    {
+                        using var fs = File.OpenRead(bgPath);
+                        bgImageTexture = Texture2D.FromStream(GraphicsDevice, fs);
+                    }
+                    catch { bgImageTexture = null; }
+                }
+            }
         }
 
         void EnterBorderlessFullscreen()
@@ -1375,6 +1543,18 @@ namespace ClickerGame
             float time = (float)stopwatch.Elapsed.TotalSeconds;
             int ll = LaneLeft, hz = HitZoneY;
 
+            // Video / background image behind lanes
+            var videoFrame = videoPlayer?.CurrentFrame;
+            if (videoFrame != null)
+            {
+                // Draw video frame scaled to fill screen, semi-transparent
+                spriteBatch!.Draw(videoFrame, new Rectangle(0, 0, width, height), Color.White * 0.35f);
+            }
+            else if (bgImageTexture != null)
+            {
+                spriteBatch!.Draw(bgImageTexture, new Rectangle(0, 0, width, height), Color.White * 0.25f);
+            }
+
             for (int i = 0; i < LaneCount; i++)
                 spriteBatch!.Draw(pixel!, new Rectangle(ll + i * LaneWidth, 0, LaneWidth, height), Color.White * (i % 2 == 0 ? 0.02f : 0.04f));
             for (int i = 0; i <= LaneCount; i++)
@@ -1396,7 +1576,7 @@ namespace ClickerGame
             for (var n = notes.Last; n != null; n = n.Previous)
             {
                 float dt = n.Value.Time - time;
-                if (time - n.Value.Time > GameConfig.ApproachTime + 0.75f) continue;
+                if (time - n.Value.Time > GameConfig.MissWindow) continue;
                 float prog = (GameConfig.ApproachTime - dt) / (GameConfig.ApproachTime + 0.01f);
                 int nx = ll + n.Value.Column * LaneWidth + 6;
                 int ny = (int)(MathHelper.Clamp(prog, 0f, 1f) * (hz - NoteHeight));
@@ -1427,7 +1607,7 @@ namespace ClickerGame
                 spriteBatch!.Draw(jt, new Vector2(j.Position.X - jt.Width / 2, j.Position.Y), Color.White * ja);
             }
 
-            // HUD
+            // HUD - top
             string st = songs.Count > 0 ? songs[currentSongIndex].Title : Localization.Get("unknown");
             var tt = textRenderer!.GetTexture(st, "Segoe UI", 18, Color.White);
             spriteBatch.Draw(tt, new Vector2(16, 14), Color.White);
@@ -1451,11 +1631,83 @@ namespace ClickerGame
                 spriteBatch.Draw(pixel!, new Rectangle(0, 0, (int)(width * pr), 3), glow);
             }
 
+            // ═══ SAO-style HP bar (right side) ═══
+            DrawHPBar();
+
+            // ═══ Judgment counter (left side) ═══
+            DrawJudgmentCounter();
+
             if (editorMode)
             {
                 var et = textRenderer!.GetTexture(Localization.Get("editor_hint"), "Segoe UI", 14, Color.Yellow);
                 spriteBatch.Draw(et, new Vector2((width - et.Width) / 2, height - 22), Color.White);
             }
+        }
+
+        void DrawHPBar()
+        {
+            // SAO-style HP bar: vertical bar on the right with gradient coloring
+            int barW = 12, barH = height - 160;
+            int barX = width - barW - 20, barY = 80;
+
+            // Background
+            spriteBatch!.Draw(pixel!, new Rectangle(barX - 1, barY - 1, barW + 2, barH + 2), new Color(20, 20, 40) * 0.8f);
+            DrawRectBorder(new Rectangle(barX - 1, barY - 1, barW + 2, barH + 2), Color.White * 0.1f);
+
+            // HP fill from bottom
+            float hpRatio = Math.Clamp(hp / GameConfig.MaxHP, 0, 1);
+            int fillH = (int)(barH * hpRatio);
+            int fillY = barY + barH - fillH;
+
+            // Color gradient: green→yellow→red based on HP
+            Color hpColor;
+            if (hpRatio > 0.6f)
+                hpColor = Color.Lerp(new Color(80, 255, 120), new Color(255, 220, 50), (1f - hpRatio) / 0.4f * 0.5f);
+            else if (hpRatio > 0.3f)
+                hpColor = Color.Lerp(new Color(255, 220, 50), new Color(255, 120, 0), (0.6f - hpRatio) / 0.3f);
+            else
+                hpColor = Color.Lerp(new Color(255, 120, 0), new Color(255, 40, 40), (0.3f - hpRatio) / 0.3f);
+
+            // Glow effect
+            spriteBatch.Draw(pixel!, new Rectangle(barX - 2, fillY - 1, barW + 4, fillH + 2), hpColor * 0.15f);
+            spriteBatch.Draw(pixel!, new Rectangle(barX, fillY, barW, fillH), hpColor * 0.85f);
+            // Bright top edge
+            if (fillH > 2)
+                spriteBatch.Draw(pixel!, new Rectangle(barX, fillY, barW, 2), Color.White * 0.4f);
+
+            // HP text label
+            var hpLabel = textRenderer!.GetTexture("HP", "Segoe UI", 11, hpColor);
+            spriteBatch.Draw(hpLabel, new Vector2(barX + (barW - hpLabel.Width) / 2, barY - 18), Color.White);
+
+            // Critical HP warning flash
+            if (hpRatio < 0.2f && hpRatio > 0)
+            {
+                float flash = (float)(0.5 + 0.5 * Math.Sin(stopwatch.Elapsed.TotalSeconds * 8));
+                spriteBatch.Draw(pixel!, new Rectangle(0, 0, width, height), new Color(255, 0, 0) * (flash * 0.04f));
+            }
+        }
+
+        void DrawJudgmentCounter()
+        {
+            // Judgment counter on the left side
+            int cx = 16, cy = height / 2 - 60;
+            int w = 100, lh = 22;
+
+            // Semi-transparent panel
+            spriteBatch!.Draw(pixel!, new Rectangle(cx - 4, cy - 4, w + 8, lh * 4 + 12), new Color(10, 10, 25) * 0.6f);
+            DrawRectBorder(new Rectangle(cx - 4, cy - 4, w + 8, lh * 4 + 12), Color.White * 0.06f);
+
+            var pT = textRenderer!.GetTexture($"P  {perfectCount}", "Segoe UI", 13, new Color(255, 220, 50));
+            spriteBatch.Draw(pT, new Vector2(cx, cy), Color.White);
+
+            var grT = textRenderer!.GetTexture($"G  {greatCount}", "Segoe UI", 13, new Color(80, 255, 120));
+            spriteBatch.Draw(grT, new Vector2(cx, cy + lh), Color.White);
+
+            var gdT = textRenderer!.GetTexture($"OK {goodCount}", "Segoe UI", 13, new Color(0, 200, 255));
+            spriteBatch.Draw(gdT, new Vector2(cx, cy + lh * 2), Color.White);
+
+            var mT = textRenderer!.GetTexture($"X  {missCount}", "Segoe UI", 13, new Color(255, 80, 80));
+            spriteBatch.Draw(mT, new Vector2(cx, cy + lh * 3), Color.White);
         }
 
         // ═══════════ Modern Menu ═══════════

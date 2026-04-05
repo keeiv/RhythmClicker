@@ -34,6 +34,8 @@ namespace ClickerGame
                 if (osuFiles.Length == 0) return results;
 
                 string? audioFileCopied = null;
+                string? videoFileCopied = null;
+                string? bgImageCopied = null;
 
                 foreach (var osuFile in osuFiles)
                 {
@@ -62,8 +64,41 @@ namespace ClickerGame
                             audioFileCopied = wavName;
                         }
                     }
-                    // Update AudioFile to the WAV name for all beatmaps
+
+                    // Copy video file once
+                    if (videoFileCopied == null && !string.IsNullOrEmpty(bm.VideoFile))
+                    {
+                        string videoSrc = Path.Combine(tempDir, bm.VideoFile);
+                        if (File.Exists(videoSrc))
+                        {
+                            string prefix = !string.IsNullOrEmpty(songId) ? songId + "_" : "";
+                            string videoName = prefix + Path.GetFileName(bm.VideoFile);
+                            string videoDest = Path.Combine(assetsDir, videoName);
+                            if (!File.Exists(videoDest))
+                                File.Copy(videoSrc, videoDest, false);
+                            videoFileCopied = videoName;
+                        }
+                    }
+
+                    // Copy background image once
+                    if (bgImageCopied == null && !string.IsNullOrEmpty(bm.BackgroundImage))
+                    {
+                        string bgSrc = Path.Combine(tempDir, bm.BackgroundImage);
+                        if (File.Exists(bgSrc))
+                        {
+                            string prefix = !string.IsNullOrEmpty(songId) ? songId + "_" : "";
+                            string bgName = prefix + Path.GetFileName(bm.BackgroundImage);
+                            string bgDest = Path.Combine(assetsDir, bgName);
+                            if (!File.Exists(bgDest))
+                                File.Copy(bgSrc, bgDest, false);
+                            bgImageCopied = bgName;
+                        }
+                    }
+
+                    // Update file paths for all beatmaps
                     if (audioFileCopied != null) bm.AudioFile = audioFileCopied;
+                    if (videoFileCopied != null) bm.VideoFile = videoFileCopied;
+                    if (bgImageCopied != null) bm.BackgroundImage = bgImageCopied;
 
                     results.Add((bm, diffLabel));
                 }
@@ -126,6 +161,10 @@ namespace ClickerGame
                                 System.Globalization.CultureInfo.InvariantCulture, out overallDifficulty);
                         break;
 
+                    case "Events":
+                        ParseEventLine(line, bm);
+                        break;
+
                     case "TimingPoints":
                         ParseTimingPoint(line, timingPoints);
                         break;
@@ -162,6 +201,38 @@ namespace ClickerGame
                 System.Globalization.CultureInfo.InvariantCulture, out double beatLength)) return;
             bool inherited = parts.Length > 6 && parts[6].Trim() == "0";
             list.Add((offset, beatLength, inherited));
+        }
+
+        /// <summary>Parse [Events] section for video and background image declarations.</summary>
+        static void ParseEventLine(string line, Beatmap bm)
+        {
+            // Video: "Video,offset,"filename"" or "1,offset,"filename""
+            if (line.StartsWith("Video,", StringComparison.OrdinalIgnoreCase) || line.StartsWith("1,"))
+            {
+                string filename = ExtractQuotedFilename(line);
+                if (!string.IsNullOrEmpty(filename))
+                    bm.VideoFile = filename;
+            }
+            // Background image: "0,0,"filename.jpg",0,0"
+            else if (line.StartsWith("0,0,"))
+            {
+                string filename = ExtractQuotedFilename(line);
+                if (!string.IsNullOrEmpty(filename))
+                {
+                    string ext = Path.GetExtension(filename).ToLowerInvariant();
+                    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp")
+                        bm.BackgroundImage = filename;
+                }
+            }
+        }
+
+        static string ExtractQuotedFilename(string line)
+        {
+            int q1 = line.IndexOf('"');
+            if (q1 < 0) return "";
+            int q2 = line.IndexOf('"', q1 + 1);
+            if (q2 <= q1) return "";
+            return line.Substring(q1 + 1, q2 - q1 - 1).Trim();
         }
 
         static void ParseHitObject(string line, List<OsuHitObject> list)

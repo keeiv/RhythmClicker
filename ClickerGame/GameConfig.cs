@@ -13,6 +13,9 @@ namespace ClickerGame
         public const float GreatWindow = 0.12f;
         public const float GoodWindow = 0.30f;
 
+        // Miss window: how long after note's intended time before auto-MISS
+        public const float MissWindow = 0.35f;
+
         // Scores per judgment
         public const int PerfectScore = 100;
         public const int GreatScore = 75;
@@ -23,5 +26,13 @@ namespace ClickerGame
         public const int ComboTier2 = 15;
         public const int ComboTier3 = 30;
         public const int ComboTier4 = 50;
+
+        // HP system (SAO-style)
+        public const float MaxHP = 100f;
+        public const float InitialHP = 80f;
+        public const float HPDrainMiss = 12f;
+        public const float HPGainPerfect = 3f;
+        public const float HPGainGreat = 1.5f;
+        public const float HPGainGood = 0.5f;
     }
 }

@@ -9,6 +9,8 @@ namespace ClickerGame
         public string Name { get; set; } = "";
         public string Author { get; set; } = "";
         public string AudioFile { get; set; } = "";
+        public string VideoFile { get; set; } = "";
+        public string BackgroundImage { get; set; } = "";
         public float Bpm { get; set; }
         public List<Note> Notes { get; set; } = new();
 
